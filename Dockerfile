@@ -302,4 +302,8 @@ RUN yum clean all && \
     rm -rf /root/*.zip && \
     rm -rf /tmp/*
 
+RUN rm -f /root/miniconda.sh
+RUN conda clean --all -y
+RUN rm -rf /usr/share/doc/*
+
 WORKDIR /root
