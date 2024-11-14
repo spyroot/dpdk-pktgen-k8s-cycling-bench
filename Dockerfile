@@ -286,8 +286,7 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
     && rm -rf /root/nasm
 
 # in order to plot
-RUN pip install matplotlib numpy
-RUN pip install matplotlib numpy
+RUN pip install --no-cache-dir matplotlib numpy
 RUN pip show matplotlib && pip show numpy
 
 COPY stress-ng_cpu_bench.sh /
