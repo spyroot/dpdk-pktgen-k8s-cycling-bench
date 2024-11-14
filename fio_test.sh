@@ -2,7 +2,7 @@
 
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 
-echo "Running randrw test with depth=1 and blocksize=1M..."
+echo "Running randrw test with depth=1 and blocksize=1M, saving to $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt..."
 fio --name=rand_io_depth1_blocksize1M \
     --ioengine=libaio \
     --iodepth=1 \
@@ -21,9 +21,9 @@ fio --name=rand_io_depth1_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth1_blocksize1M_result.txt
-echo "Completed randrw test with depth=1 and blocksize=1M."
+echo "Completed randrw test with depth=1 and blocksize=1M. Results saved to $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt"
 
-echo "Running randrw test with depth=16 and blocksize=1M..."
+echo "Running randrw test with depth=16 and blocksize=1M, saving to $OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt..."
 fio --name=rand_io_depth16_blocksize1M \
     --ioengine=libaio \
     --iodepth=16 \
@@ -42,9 +42,9 @@ fio --name=rand_io_depth16_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth16_blocksize1M_result.txt
-echo "Completed randrw test with depth=16 and blocksize=1M."
+echo "Completed randrw test with depth=16 and blocksize=1M. Results saved to $OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt"
 
-echo "Running randrw test with depth=16 and blocksize=4K..."
+echo "Running randrw test with depth=16 and blocksize=4K, saving to $OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt..."
 fio --name=rand_io_depth16_blocksize4K \
     --ioengine=libaio \
     --iodepth=16 \
@@ -63,9 +63,9 @@ fio --name=rand_io_depth16_blocksize4K \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth16_blocksize4K_result.txt
-echo "Completed randrw test with depth=16 and blocksize=4K."
+echo "Completed randrw test with depth=16 and blocksize=4K. Results saved to $OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt"
 
-echo "Running seq test with depth=1 and blocksize=1M..."
+echo "Running seq test with depth=1 and blocksize=1M, saving to $OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt..."
 fio --name=seq_io_depth1_blocksize1M \
     --ioengine=libaio \
     --iodepth=1 \
@@ -84,9 +84,9 @@ fio --name=seq_io_depth1_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth1_blocksize1M_result.txt
-echo "Completed seq test with depth=1 and blocksize=1M."
+echo "Completed seq test with depth=1 and blocksize=1M. Results saved to $OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt"
 
-echo "Running seq test with depth=16 and blocksize=1M..."
+echo "Running seq test with depth=16 and blocksize=1M, saving to $OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt..."
 fio --name=seq_io_depth16_blocksize1M \
     --ioengine=libaio \
     --iodepth=16 \
@@ -105,9 +105,9 @@ fio --name=seq_io_depth16_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth16_blocksize1M_result.txt
-echo "Completed seq test with depth=16 and blocksize=1M."
+echo "Completed seq test with depth=16 and blocksize=1M. Results saved to $OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt"
 
-echo "Running seq test with depth=16 and blocksize=4K..."
+echo "Running seq test with depth=16 and blocksize=4K, saving to $OUTPUT_DIR/seq_io_depth16_blocksize4K_result.txt..."
 fio --name=seq_io_depth16_blocksize4K \
     --ioengine=libaio \
     --iodepth=16 \
@@ -126,7 +126,6 @@ fio --name=seq_io_depth16_blocksize4K \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth16_blocksize4K_result.txt
-echo "Completed seq test with depth=16 and blocksize=4K."
+echo "Completed seq test with depth=16 and blocksize=4K. Results saved to $OUTPUT_DIR/seq_io_depth16_blocksize4K_result.txt"
 
 echo "All fio tests completed and results saved to $OUTPUT_DIR"
-
