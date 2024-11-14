@@ -148,7 +148,7 @@
 
 FROM spyroot/pktgen_toolbox_generic:latest
 RUN yum update -y && \
-    yum install -y gcc make git libpcap-devel
+    yum install -y gcc make git libpcap-devel rpm
 
 ENV GOMAXPROCS=$(nproc)
 ENV GO111MODULE=on
@@ -287,6 +287,8 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
 
 # in order to plot
 RUN pip install matplotlib numpy
+RUN pip install matplotlib numpy
+RUN pip show matplotlib && pip show numpy
 
 COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
