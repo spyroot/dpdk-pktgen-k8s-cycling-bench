@@ -1,4 +1,4 @@
-IMAGE_NAME = dpdk-pktgen-k8s-cycling-bench
+IMAGE_NAME = spyroot/dpdk-pktgen-k8s-cycling-bench
 DOCKER_TAG = latest
 ARCHS = amd64 arm64
 
