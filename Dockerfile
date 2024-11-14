@@ -288,6 +288,6 @@ RUN pip install matplotlib numpy
 COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
 COPY cyclictest_plot.sh /
-COPY histogram_plot.py /
 COPY cyclictest_per_thread.py /
+
 WORKDIR /root
