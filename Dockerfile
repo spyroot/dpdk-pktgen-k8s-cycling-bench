@@ -296,4 +296,10 @@ COPY cyclictest_plot.sh /
 COPY cyclictest_per_thread.py /
 COPY histogram_plot_per_thead.py /
 
+RUN yum clean all && \
+    rm -rf /var/cache/yum && \
+    rm -rf /root/*.tar.gz && \
+    rm -rf /root/*.zip && \
+    rm -rf /tmp/*
+
 WORKDIR /root

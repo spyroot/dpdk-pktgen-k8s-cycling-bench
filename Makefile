@@ -15,6 +15,7 @@ $(ARCHS):
 	fi
 
 push:
+	docker tag dpdk-pktgen-k8s-cycling-bench:latest spyroot/dpdk-pktgen-k8s-cycling-bench:latest
 	docker push $(IMAGE_NAME):$(DOCKER_TAG)
 
 clean:
