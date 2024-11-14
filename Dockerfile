@@ -296,16 +296,19 @@ COPY cyclictest_plot.sh /
 COPY cyclictest_per_thread.py /
 COPY histogram_plot_per_thead.py /
 
+WORKDIR /root
+
 RUN yum clean all && \
     rm -rf /var/cache/yum && \
     rm -rf /root/*.tar.gz && \
     rm -rf /root/*.zip && \
-    rm -rf /tmp/* && \
-    rm -rf /root/\~ && \
+    rm -rf /tmp/*
+
+RUN rm -rf /root/~ && \
     rm -rf /root/sonobuoy
 
 RUN rm -f /root/miniconda.sh
 RUN /root/miniconda/bin/conda clean --all -y
 RUN rm -rf /usr/share/doc/*
 
-WORKDIR /root
+WORKDIR /
