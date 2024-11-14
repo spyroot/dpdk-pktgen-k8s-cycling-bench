@@ -1,9 +1,6 @@
-#
-# Mus spyroot@gmail.com
 import os
 import re
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import numpy as np
 
 CURRENT_DIRECTORY = os.getcwd()
@@ -67,7 +64,7 @@ def generate_colors(num_threads):
     return colors
 
 
-def plot_latency_data(thread_counts, filename, num_threads, max_latencies, avg_latencies):
+def plot_latency_data(thread_counts, filename, num_threads, max_latencies, avg_latencies, output_directory):
     """
     Plot latency data for each thread.
     :param thread_counts: List of lists containing latency counts for each thread.
@@ -75,7 +72,7 @@ def plot_latency_data(thread_counts, filename, num_threads, max_latencies, avg_l
     :param num_threads: Number of threads used in the test.
     :param max_latencies: List of max latencies for each thread.
     :param avg_latencies: List of average latencies for each thread.
-    :return:
+    :param output_directory: Directory to save the plot.
     """
     fig, ax = plt.subplots(figsize=(12, 8), dpi=150)
     colors = generate_colors(num_threads)
@@ -92,20 +89,20 @@ def plot_latency_data(thread_counts, filename, num_threads, max_latencies, avg_l
     ax.set_title(f"Latency Plot by CPU - {num_threads} cores, max {overall_max_latency} μs")
     ax.legend()
 
-    plot_path = os.path.join(PLOTS_DIRECTORY, filename + ".png")
+    plot_path = os.path.join(output_directory, filename + ".png")
     plt.savefig(plot_path, bbox_inches="tight")
     plt.close()
     print(f"Plot generated with {num_threads} threads, "
           f"maximum latency {overall_max_latency} μs. Plot saved to '{plot_path}'")
 
 
-def process_all_histogram_files(directory):
+def process_all_histogram_files(directory, output_directory=DEFAULT_PLOTS_DIRECTORY):
     """
     Process all cycling test histogram files in a specified directory.
     :param directory: Path to the directory containing histogram files.
-    :param directory:
-    :return:
+    :param output_directory: Directory to save the plots.
     """
+    create_plots_directory(output_directory)
     for filename in os.listdir(directory):
         if filename.startswith("cyclictest_histogram") and filename.endswith(".txt"):
             num_threads, _ = parse_filename(filename)
@@ -113,7 +110,7 @@ def process_all_histogram_files(directory):
                 filepath = os.path.join(directory, filename)
                 thread_counts, max_latencies, avg_latencies = read_latency_data(filepath)
                 plot_latency_data(thread_counts, filename.replace('.txt', ''), num_threads, max_latencies,
-                                  avg_latencies)
+                                  avg_latencies, output_directory)
 
 
 if __name__ == '__main__':
