@@ -6,17 +6,16 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
 
-# Current directory path
 CURRENT_DIRECTORY = os.getcwd()
-PLOTS_DIRECTORY = os.path.join(CURRENT_DIRECTORY, "plots")
+DEFAULT_PLOTS_DIRECTORY = os.path.join(CURRENT_DIRECTORY, "plots")
 
 
-def create_plots_directory():
-    """Create dir for plots
-    :return:
+def create_plots_directory(output_directory=DEFAULT_PLOTS_DIRECTORY):
+    """Create directory for plots if it doesn't exist.
+    :param output_directory: Directory path for saving plots.
     """
-    if not os.path.exists(PLOTS_DIRECTORY):
-        os.makedirs(PLOTS_DIRECTORY)
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
 
 
 def parse_filename(filename):
@@ -117,5 +116,6 @@ def process_all_histogram_files(directory):
                                   avg_latencies)
 
 
-create_plots_directory()
-process_all_histogram_files(CURRENT_DIRECTORY)
+if __name__ == '__main__':
+    output_dir = os.getenv("OUTPUT_DIR", DEFAULT_PLOTS_DIRECTORY)
+    process_all_histogram_files(CURRENT_DIRECTORY, output_directory=output_dir)

@@ -4,6 +4,9 @@
 # Version: 1.0
 # docker build -t dpdk-pktgen-k8s-cycling-bench .
 # docker run --privileged -it dpdk-pktgen-k8s-cycling-bench /bin/bash
+# docker run --privileged -it \
+#    -v "$(pwd)/output:/output" \
+#    dpdk-pktgen-k8s-cycling-bench /bin/bash
 
 # Testing Tools Included in This Dockerfile:
 #
