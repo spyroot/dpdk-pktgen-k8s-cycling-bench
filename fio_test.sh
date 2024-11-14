@@ -20,7 +20,7 @@ fio --name=rand_io_depth1_blocksize1M \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt
+    > "$OUTPUT_DIR"/rand_io_depth1_blocksize1M_result.txt
 echo "Completed randrw test with depth=1 and blocksize=1M."
 
 echo "Running randrw test with depth=16 and blocksize=1M..."
@@ -41,7 +41,7 @@ fio --name=rand_io_depth16_blocksize1M \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt
+    > "$OUTPUT_DIR"/rand_io_depth16_blocksize1M_result.txt
 echo "Completed randrw test with depth=16 and blocksize=1M."
 
 echo "Running randrw test with depth=16 and blocksize=4K..."
@@ -62,7 +62,7 @@ fio --name=rand_io_depth16_blocksize4K \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt
+    > "$OUTPUT_DIR"/rand_io_depth16_blocksize4K_result.txt
 echo "Completed randrw test with depth=16 and blocksize=4K."
 
 echo "Running seq test with depth=1 and blocksize=1M..."
@@ -83,7 +83,7 @@ fio --name=seq_io_depth1_blocksize1M \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt
+    > "$OUTPUT_DIR"/seq_io_depth1_blocksize1M_result.txt
 echo "Completed seq test with depth=1 and blocksize=1M."
 
 echo "Running seq test with depth=16 and blocksize=1M..."
@@ -104,7 +104,7 @@ fio --name=seq_io_depth16_blocksize1M \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt
+    > "$OUTPUT_DIR"/seq_io_depth16_blocksize1M_result.txt
 echo "Completed seq test with depth=16 and blocksize=1M."
 
 echo "Running seq test with depth=16 and blocksize=4K..."
@@ -125,7 +125,7 @@ fio --name=seq_io_depth16_blocksize4K \
     --norandommap \
     --randrepeat=0 \
     --rwmixread=70 \
-    > $OUTPUT_DIR/seq_io_depth16_blocksize4K_result.txt
+    > "$OUTPUT_DIR"/seq_io_depth16_blocksize4K_result.txt
 echo "Completed seq test with depth=16 and blocksize=4K."
 
 echo "All fio tests completed and results saved to $OUTPUT_DIR"
