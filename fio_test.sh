@@ -82,13 +82,11 @@ extract_metrics() {
     local WRITE_LAT_MAX
     local WRITE_LAT_AVG
 
-    # Extract IOPS and Bandwidth for both read and write
     READ_IOPS=$(grep "read: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
     WRITE_IOPS=$(grep "write: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
     READ_BW=$(grep "read:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
     WRITE_BW=$(grep "write:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
 
-    # Extract Read Latency (slat, clat, lat)
     READ_SLAT_MIN=$(grep -A 3 "read:" "$RESULT_FILE" | grep "slat (usec)" | awk -F'min=' '{print $2}' | cut -d',' -f1)
     READ_SLAT_MAX=$(grep -A 3 "read:" "$RESULT_FILE" | grep "slat (usec)" | awk -F'max=' '{print $2}' | cut -d',' -f1)
     READ_SLAT_AVG=$(grep -A 3 "read:" "$RESULT_FILE" | grep "slat (usec)" | awk -F'avg=' '{print $2}' | cut -d',' -f1)
@@ -137,7 +135,6 @@ extract_metrics() {
     if [[ -z "$WRITE_LAT_MAX" ]]; then WRITE_LAT_MAX="N/A"; fi
     if [[ -z "$WRITE_LAT_AVG" ]]; then WRITE_LAT_AVG="N/A"; fi
 
-    # Print the results
     echo "Performance Summary for $RESULT_FILE:"
     echo "===================="
     echo "Read IOPS: $READ_IOPS"
@@ -145,7 +142,6 @@ extract_metrics() {
     echo "Read Bandwidth: $READ_BW MB/s"
     echo "Write Bandwidth: $WRITE_BW MB/s"
 
-    # Print latency summaries for read and write
     echo "Read Latency (slat): min=$READ_SLAT_MIN, max=$READ_SLAT_MAX, avg=$READ_SLAT_AVG us"
     echo "Read Latency (clat): min=$READ_CLAT_MIN, max=$READ_CLAT_MAX, avg=$READ_CLAT_AVG us"
     echo "Read Latency (lat): min=$READ_LAT_MIN, max=$READ_LAT_MAX, avg=$READ_LAT_AVG us"
@@ -154,7 +150,6 @@ extract_metrics() {
     echo "Write Latency (clat): min=$WRITE_CLAT_MIN, max=$WRITE_CLAT_MAX, avg=$WRITE_CLAT_AVG us"
     echo "Write Latency (lat): min=$WRITE_LAT_MIN, max=$WRITE_LAT_MAX, avg=$WRITE_LAT_AVG us"
 
-    # Optionally, save the summary to a report file
     local REPORT_FILE="$OUTPUT_DIR/fio_performance_report.txt"
 
     echo "Performance Summary for $RESULT_FILE:" >> "$REPORT_FILE"
