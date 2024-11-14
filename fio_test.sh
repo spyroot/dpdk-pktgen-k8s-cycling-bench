@@ -62,6 +62,49 @@ else
     NUMJOBS=1    # Normal number of jobs
 fi
 
+
+
+# Define a function to extract performance metrics from a given result file
+extract_metrics() {
+    RESULT_FILE=$1
+
+    # Extract IOPS and Bandwidth for both read and write
+    READ_IOPS=$(grep "read: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
+    WRITE_IOPS=$(grep "write: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
+    READ_BW=$(grep "read:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
+    WRITE_BW=$(grep "write:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
+
+    # Extract Latency
+    LATENCY_MIN=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "min=[\d\.]+" | cut -d= -f2)
+    LATENCY_MAX=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "max=[\d\.]+" | cut -d= -f2)
+    LATENCY_AVG=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "avg=[\d\.]+" | cut -d= -f2)
+
+    # Print the results
+    echo "Performance Summary for $RESULT_FILE:"
+    echo "===================="
+    echo "Read IOPS: $READ_IOPS"
+    echo "Write IOPS: $WRITE_IOPS"
+    echo "Read Bandwidth: $READ_BW MB/s"
+    echo "Write Bandwidth: $WRITE_BW MB/s"
+    echo "Latency (min): $LATENCY_MIN us"
+    echo "Latency (max): $LATENCY_MAX us"
+    echo "Latency (avg): $LATENCY_AVG us"
+
+    # Optionally, save the summary to a report file
+    REPORT_FILE="$OUTPUT_DIR/fio_performance_report.txt"
+    echo "Performance Summary for $RESULT_FILE:" >> "$REPORT_FILE"
+    echo "====================" >> "$REPORT_FILE"
+    echo "Read IOPS: $READ_IOPS" >> "$REPORT_FILE"
+    echo "Write IOPS: $WRITE_IOPS" >> "$REPORT_FILE"
+    echo "Read Bandwidth: $READ_BW MB/s" >> "$REPORT_FILE"
+    echo "Write Bandwidth: $WRITE_BW MB/s" >> "$REPORT_FILE"
+    echo "Latency (min): $LATENCY_MIN us" >> "$REPORT_FILE"
+    echo "Latency (max): $LATENCY_MAX us" >> "$REPORT_FILE"
+    echo "Latency (avg): $LATENCY_AVG us" >> "$REPORT_FILE"
+    echo "------------------------" >> "$REPORT_FILE"
+}
+
+
 echo "Running randrw test with depth=1 and blocksize=1M, saving to $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt..."
 fio --name=rand_io_depth1_blocksize1M \
     --ioengine=libaio \
@@ -81,6 +124,7 @@ fio --name=rand_io_depth1_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth1_blocksize1M_result.txt
+extract_metrics "$OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt"
 echo "Completed randrw test with depth=1 and blocksize=1M. Results saved to $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt"
 
 echo "Running randrw test with depth=16 and blocksize=1M, saving to $OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt..."
@@ -102,6 +146,7 @@ fio --name=rand_io_depth16_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth16_blocksize1M_result.txt
+extract_metrics "$OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt"
 echo "Completed randrw test with depth=16 and blocksize=1M. Results saved to $OUTPUT_DIR/rand_io_depth16_blocksize1M_result.txt"
 
 echo "Running randrw test with depth=16 and blocksize=4K, saving to $OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt..."
@@ -123,6 +168,7 @@ fio --name=rand_io_depth16_blocksize4K \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/rand_io_depth16_blocksize4K_result.txt
+extract_metrics "$OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt"
 echo "Completed randrw test with depth=16 and blocksize=4K. Results saved to $OUTPUT_DIR/rand_io_depth16_blocksize4K_result.txt"
 
 echo "Running seq test with depth=1 and blocksize=1M, saving to $OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt..."
@@ -144,6 +190,7 @@ fio --name=seq_io_depth1_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth1_blocksize1M_result.txt
+extract_metrics "$OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt"
 echo "Completed seq test with depth=1 and blocksize=1M. Results saved to $OUTPUT_DIR/seq_io_depth1_blocksize1M_result.txt"
 
 echo "Running seq test with depth=16 and blocksize=1M, saving to $OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt..."
@@ -165,6 +212,7 @@ fio --name=seq_io_depth16_blocksize1M \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth16_blocksize1M_result.txt
+extract_metrics "$OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt"
 echo "Completed seq test with depth=16 and blocksize=1M. Results saved to $OUTPUT_DIR/seq_io_depth16_blocksize1M_result.txt"
 
 echo "Running seq test with depth=16 and blocksize=4K, saving to $OUTPUT_DIR/seq_io_depth16_blocksize4K_result.txt..."
@@ -186,6 +234,7 @@ fio --name=seq_io_depth16_blocksize4K \
     --randrepeat=0 \
     --rwmixread=70 \
     > "$OUTPUT_DIR"/seq_io_depth16_blocksize4K_result.txt
+extract_metrics "$OUTPUT_DIR/seq_io_depth16_blocksize4K_result"
 echo "Completed seq test with depth=16 and blocksize=4K. Results saved to $OUTPUT_DIR/seq_io_depth16_blocksize4K_result.txt"
 
 echo "All fio tests completed and results saved to $OUTPUT_DIR"
