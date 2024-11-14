@@ -292,5 +292,6 @@ COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
 COPY cyclictest_plot.sh /
 COPY cyclictest_per_thread.py /
+COPY histogram_plot_per_thead.py /
 
 WORKDIR /root

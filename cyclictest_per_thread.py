@@ -3,7 +3,7 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 
-CURRENT_DIRECTORY = os.getcwd()
+CURRENT_DIRECTORY = os.getenv("OUTPUT_DIR", os.getcwd())
 DEFAULT_PLOTS_DIRECTORY = os.path.join(CURRENT_DIRECTORY, "plots")
 
 
@@ -17,14 +17,15 @@ def create_plots_directory(output_directory=DEFAULT_PLOTS_DIRECTORY):
 
 def parse_filename(filename):
     """
-    :param filename:
-    :return:
+    Parse the filename to extract the number of threads and duration.
+    :param filename: Filename in format cyclictest_histogram_<num_threads>_threads_<duration>_seconds.txt
+    :return: num_threads, duration
     """
-    match = re.match(r"cyclictest_histogram_(\d+)t_h(\d+).txt", filename)
+    match = re.match(r"cyclictest_histogram_(\d+)_threads_(\d+)_seconds.txt", filename)
     if match:
         num_threads = int(match.group(1))
-        histogram_threshold = int(match.group(2))
-        return num_threads, histogram_threshold
+        duration = int(match.group(2))
+        return num_threads, duration
     return None, None
 
 
