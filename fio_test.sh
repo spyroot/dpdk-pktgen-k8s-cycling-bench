@@ -63,23 +63,18 @@ else
 fi
 
 
-
-# Define a function to extract performance metrics from a given result file
 extract_metrics() {
-    RESULT_FILE=$1
+    local RESULT_FILE=$1
 
-    # Extract IOPS and Bandwidth for both read and write
-    READ_IOPS=$(grep "read: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
-    WRITE_IOPS=$(grep "write: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
-    READ_BW=$(grep "read:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
-    WRITE_BW=$(grep "write:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
+    local READ_IOPS=$(grep "read: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
+    local WRITE_IOPS=$(grep "write: IOPS=" "$RESULT_FILE" | awk -F',' '{print $1}' | awk '{print $2}')
+    local READ_BW=$(grep "read:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
+    local WRITE_BW=$(grep "write:" "$RESULT_FILE" | grep -oP "BW=\K[\d\.]+")
 
-    # Extract Latency
-    LATENCY_MIN=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "min=[\d\.]+" | cut -d= -f2)
-    LATENCY_MAX=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "max=[\d\.]+" | cut -d= -f2)
-    LATENCY_AVG=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "avg=[\d\.]+" | cut -d= -f2)
+    local LATENCY_MIN=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "min=[\d\.]+" | cut -d= -f2)
+    local LATENCY_MAX=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "max=[\d\.]+" | cut -d= -f2)
+    local LATENCY_AVG=$(grep "lat (usec)   :" "$RESULT_FILE" | grep -oP "avg=[\d\.]+" | cut -d= -f2)
 
-    # Print the results
     echo "Performance Summary for $RESULT_FILE:"
     echo "===================="
     echo "Read IOPS: $READ_IOPS"
@@ -90,8 +85,7 @@ extract_metrics() {
     echo "Latency (max): $LATENCY_MAX us"
     echo "Latency (avg): $LATENCY_AVG us"
 
-    # Optionally, save the summary to a report file
-    REPORT_FILE="$OUTPUT_DIR/fio_performance_report.txt"
+    local REPORT_FILE="$OUTPUT_DIR/fio_performance_report.txt"
     echo "Performance Summary for $RESULT_FILE:" >> "$REPORT_FILE"
     echo "====================" >> "$REPORT_FILE"
     echo "Read IOPS: $READ_IOPS" >> "$REPORT_FILE"
@@ -103,7 +97,6 @@ extract_metrics() {
     echo "Latency (avg): $LATENCY_AVG us" >> "$REPORT_FILE"
     echo "------------------------" >> "$REPORT_FILE"
 }
-
 
 echo "Running randrw test with depth=1 and blocksize=1M, saving to $OUTPUT_DIR/rand_io_depth1_blocksize1M_result.txt..."
 fio --name=rand_io_depth1_blocksize1M \
