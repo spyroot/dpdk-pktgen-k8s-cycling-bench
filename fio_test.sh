@@ -52,7 +52,6 @@
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 DEV_MODE="${DEV_MODE:-false}"
 
-
 extract_metrics() {
     local RESULT_FILE=$1
 
