@@ -173,8 +173,10 @@ WORKDIR /root/sonobuoy
 RUN make build \
     && make golden \
     && make test \
-    && cp /root/sonobuoy/sonobuoy /usr/local/bin/sonobuoy \
-    && rm -rf /root/sonobuoy
+    && cp /root/sonobuoy/sonobuoy /usr/local/bin/sonobuoy
+
+WORKDIR /root
+RUN rm -rf /root/sonobuoy
 
 RUN curl https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz -o helm-${HELM_VERSION}-linux-amd64.tar.gz \
     && tar -zxvf helm-${HELM_VERSION}-linux-amd64.tar.gz \
