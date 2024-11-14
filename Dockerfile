@@ -297,6 +297,7 @@ COPY cyclictest_plot.sh /
 COPY cyclictest_per_thread.py /
 COPY histogram_plot_per_thead.py /
 COPY fio_test.sh /
+COPY dhry2reg_test.sh /
 
 WORKDIR /root
 
