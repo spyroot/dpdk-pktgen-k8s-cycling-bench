@@ -282,8 +282,12 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
     && make install \
     && rm -rf /root/nasm
 
+# in order to plot
+RUN pip install matplotlib
+
 COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
 COPY cyclictest_plot.sh /
+COPY histogram_plot.py /
 
 WORKDIR /root
