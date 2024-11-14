@@ -147,8 +147,9 @@
   ## docker buildx build --platform linux/amd64 MESON_ARGS="-Dplatform=generic" -t cnfdemo.io/spyroot/dpdk_generic_tester:latest .
 
 FROM spyroot/pktgen_toolbox_generic:latest
-RUN yum update -y && \
-    yum install -y gcc make git libpcap-devel rpm
+RUN yum install -y gcc make git libpcap-devel rpm && \
+    yum clean all && \
+    rm -rf /var/cache/yum /root/*.tar.gz /root/*.zip /tmp/* /usr/share/doc/*
 
 ENV GOMAXPROCS=$(nproc)
 ENV GO111MODULE=on
@@ -311,4 +312,3 @@ RUN rm -f /root/miniconda.sh
 RUN /root/miniconda/bin/conda clean --all -y
 RUN rm -rf /usr/share/doc/*
 
-WORKDIR /
