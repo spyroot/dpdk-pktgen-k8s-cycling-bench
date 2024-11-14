@@ -300,7 +300,8 @@ RUN yum clean all && \
     rm -rf /var/cache/yum && \
     rm -rf /root/*.tar.gz && \
     rm -rf /root/*.zip && \
-    rm -rf /tmp/* \
+    rm -rf /tmp/* && \
+    rm -rf /root/\~ && \
     rm -rf /root/sonobuoy
 
 RUN rm -f /root/miniconda.sh
