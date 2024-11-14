@@ -288,6 +288,7 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
 # in order to plot
 RUN pip install --no-cache-dir matplotlib numpy
 RUN pip show matplotlib && pip show numpy
+RUN /root/miniconda/bin/conda install -y matplotlib numpy
 
 COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
