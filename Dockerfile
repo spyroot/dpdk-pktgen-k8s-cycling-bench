@@ -2,7 +2,8 @@
 # Description: This Dockerfile builds an environment with tools like Pktgen-DPDK, Kubernetes, Helm,
 # Sonobuoy, and other performance testing utilities.
 # Version: 1.0
-# docker run --privileged -it pktgen-cyclingtest_toolbox /bin/bash
+# docker build -t dpdk-pktgen-k8s-cycling-bench .
+# docker run --privileged -it dpdk-pktgen-k8s-cycling-bench /bin/bash
 
 # Testing Tools Included in This Dockerfile:
 #
