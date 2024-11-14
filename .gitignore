@@ -1,0 +1,8 @@
+# Ignore PNG images
+*.png
+
+# Ignore text files
+*.txt
+
+# Ignore .idea directory (for JetBrains IDEs like PyCharm)
+.idea/
