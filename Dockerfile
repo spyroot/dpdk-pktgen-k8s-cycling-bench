@@ -147,7 +147,7 @@
   ## docker buildx build --platform linux/amd64 MESON_ARGS="-Dplatform=generic" -t cnfdemo.io/spyroot/dpdk_generic_tester:latest .
 
 FROM spyroot/pktgen_toolbox_generic:latest
-RUN yum install -y gcc make git libpcap-devel rpm go && \
+RUN yum install -y gcc make git libpcap-devel rpm go ncurses-devel rsync && \
     yum clean all && \
     rm -rf /var/cache/yum /root/*.tar.gz /root/*.zip /tmp/* /usr/share/doc/*
 
@@ -242,9 +242,7 @@ RUN git clone https://github.com/ColinIanKing/stress-ng.git /root/stress-ng \
     && rm -rf /root/stress-ng
 
 RUN pip install -U chaostoolkit chaostoolkit-kubernetes
-
 RUN pip install kube-hunter
-RUN yum install -y rsync
 
 RUN git clone https://github.com/kubernetes/kubernetes.git /root/kubernetes \
     && cd /root/kubernetes \
