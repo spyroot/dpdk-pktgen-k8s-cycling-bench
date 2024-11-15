@@ -1,13 +1,67 @@
 #!/bin/bash
 #
-# This script allow you to tun xps txq.
-# It designed so you optimize regular or vm like interface
-# and set of sriov adapters.
+# XPS Tuner Utility
 #
+# Supports both ladder (per-queue) and pool (all IRQs share CPUs) modes.
+# This script tunes Transmit Packet Steering (XPS) settings for network interfaces.
 #
-# Mus spyroot@gmail.com
+# Author: Mus spyroot@gmail.com
+#
+# Usage:
+#   ./xps_tuner.sh [pool|core] [options]
+#
+# Modes:
+#   pool  - Assign a range of CPUs to all TX queues of a network interface.
+#   core  - Assign one CPU per TX queue of a network interface in a round-robin manner.
+#
+# Options:
+#   -i | --interface <iface>       Specify interface (default: direct)
+#   -p | --prefix <vf_prefix>      Specify SRIOV VF prefix for matching (default: sriov)
+#   -s | --start-core <start>      Specify starting CPU core (default: 12)
+#   -e | --end-core <end>          Specify ending CPU core (default: 19)
+#   -h | --help                    Display this help message
+#
+# Examples:
+#
+# Pool Mode:
+#   ./xps_tuner.sh pool -i direct -s 12 -e 19
+#     Assigns the range of CPUs 12-19 to all TX queues of the "direct" interface.
+#
+#   ./xps_tuner.sh pool -i eth0 -s 20 -e 27
+#     Assigns the range of CPUs 20-27 to all TX queues of the "eth0" interface.
+#
+# Core Mode:
+#   ./xps_tuner.sh core -i direct -s 12
+#     Assigns each TX queue of the "direct" interface to a specific CPU starting from CPU 12.
+#
+#   ./xps_tuner.sh core -i eth0 -s 20
+#     Assigns each TX queue of the "eth0" interface to a specific CPU starting from CPU 20.
+#
+# SRIOV Mode:
+#   ./xps_tuner.sh pool -p sriov -s 20 -e 27
+#     Applies the pool algorithm to all SRIOV interfaces matching the prefix "sriov".
+#
+#   ./xps_tuner.sh core -p sriov -s 20
+#     Applies the core algorithm to all SRIOV interfaces matching the prefix "sriov".
+#
+# Display Updated XPS Settings:
+#   ./xps_tuner.sh core -i direct -s 12
+#     Displays the updated XPS settings for each TX queue after allocation.
+#
+# Algorithms:
+#
+# Pool Mode:
+#   - All TX queues of a network interface share the same CPU mask.
+#   - A range of CPUs (start-core to end-core) is calculated into a CPU mask.
+#   - The mask is applied to every TX queue of the network interface.
+#
+# Core Mode:
+#   - Each TX queue is assigned a specific CPU core in a round-robin manner.
+#   - Iterates over TX queues and assigns the next CPU core, wrapping back to
+#     the starting core when the end is reached.
+#
+# Default values
 
-# Default configuration
 
 iface="direct"
 if_vf_sriov="sriov"
