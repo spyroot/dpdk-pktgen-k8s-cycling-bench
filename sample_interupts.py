@@ -1,49 +1,59 @@
-# This script sample at 5 second (by default) interupts
-# and transpose view
-
-#
-# it useful to monitor which CPU core proccessing intrupts
+# This script sample at 5 second (by default) interrupts
+# and transpose view it useful to monitor which CPU core processing interrupts
 # Use case if you do any irq affinity mapping.
 
 #
-# python interupt_sampler.py
+# Author Mus spyroot@gmail.com
+#
+# python interrupt_sampler.py
 # Sampling /proc/interrupts for 5 seconds...
 #
-# CPU0: 48      0       9       0       0       0       0       0       0
-# CPU1: 0       0       0       0       0       0       0       0       0
-# CPU2: 0       0       0       0       0       0       0       0       0
-# CPU3: 0       0       0       0       0       0       3       0       0
-# CPU4: 0       0       0       0       0       0       0       0       0
-# CPU5: 0       0       0       0       0       0       0       0       0
-# CPU6: 0       0       0       0       0       0       0       0       0
-# CPU7: 0       0       0       0       0       0       0       0       0
-# CPU8: 0       0       0       0       0       0       0       0       0
-# CPU9: 0       0       0       0       0       0       0       0       0
-# CPU10: 0       0       0       0       0       0       0       0       0
-# CPU11: 0       0       0       0       0       0       0       0       0
-# CPU12: 0       0       5       0       0       0       0       0       0
-# CPU13: 0       0       0       1       0       0       0       0       0
-# CPU14: 0       0       0       0       0       0       0       0       0
-# CPU15: 0       0       0       0       0       0       0       0       0
-# CPU16: 0       0       0       0       0       0       0       0       0
-# CPU17: 0       0       0       0       0       0       0       0       0
-# CPU18: 0       0       0       0       0       0       0       0       0
-# CPU19: 0       0       0       0       0       0       0       0       0
-# CPU20: 1903    0       0       0       0       0       0       0       0
-# CPU21: 0       0       0       0       0       0       0       0       0
-# CPU22: 0       0       102     0       0       0       0       0       0
-# CPU23: 0       0       0       0       0       0       0       0       0
-# CPU24: 0       0       0       0       0       0       0       0       0
-# CPU25: 0       0       0       0       0       0       2       0       0
-# CPU26: 0       0       6       0       0       0       0       0       0
+# python i.py -c -i direct -t 2 -l 2.5
+# Starting continuous sampling every 2 seconds...
 #
+#
+# Filtered Interrupts:
+# CPU20: 1903    0       0       0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU20: 3806    0       0       0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU20: 5709    0       0       0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU20: 7612    0       0       0       0       0       0       0       0
+# CPU22: 0       0       408     0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU20: 9515    0       0       0       0       0       0       0       0
+# CPU22: 0       0       510     0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU20: 11418   0       0       0       0       0       0       0       0
+# CPU22: 0       0       612     0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU0: 336     0       0       0       0       0       0       0       0
+# CPU20: 13321   0       0       0       0       0       0       0       0
+# CPU22: 0       0       714     0       0       0       0       0       0
+#
+# Filtered Interrupts:
+# CPU0: 384     0       0       0       0       0       0       0       0
+# CPU20: 15224   0       0       0       0       0       0       0       0
+# CPU22: 0       0       816     0       0       0       0       0       0
 
 import time
 import argparse
+import math
+from collections import defaultdict
+
 
 def parse_interrupts(interface):
     """
-    :return:
+    Parses /proc/interrupts and extracts data for the specified interface.
+    :param interface: The interface name to filter (e.g., direct, eth0).
+    :return: CPU headers and CPU interrupt data as a dictionary.
     """
     with open('/proc/interrupts', 'r') as f:
         data = f.readlines()
@@ -57,8 +67,6 @@ def parse_interrupts(interface):
 
     for row_index, row in enumerate(direct_rows):
         columns = row.split()
-        # print(f"Row {row_index} split into columns: {columns}")
-
         irq_name = columns[0]
 
         for cpu_index in range(1, len(columns)):
@@ -74,28 +82,99 @@ def parse_interrupts(interface):
 
 def sample_interrupts(interface, period=5):
     """
-    :param interface:
-    :param period:
-    :return:
+    Samples /proc/interrupts once for the specified period.
+    :param interface: The interface name to filter (e.g., direct, eth0).
+    :param period: Sampling duration in seconds.
     """
     print(f"Sampling /proc/interrupts for {period} seconds...\n")
-
     time.sleep(period)
     cpu_names, cpu_interrupts = parse_interrupts(interface)
+    display_interrupts(cpu_names, cpu_interrupts)
 
+
+def continuous_sampling(interface, period=5, threshold=None):
+    """
+    Continuously samples /proc/interrupts at the specified interval
+    and filters results based on a threshold.
+
+    see display_interrupts
+
+    :param interface: The interface name to filter (e.g., direct, eth0).
+    :param period: Sampling interval in seconds.
+    :param threshold: Logarithmic threshold for filtering minor interrupts.
+    """
+    print(f"Starting continuous sampling every {period} seconds...\n")
+    cumulative_interrupts = defaultdict(lambda: [0] * len(parse_interrupts(interface)[1][0]))
+
+    try:
+        while True:
+            time.sleep(period)
+            _, cpu_interrupts = parse_interrupts(interface)
+
+            for cpu_index in cpu_interrupts:
+                for irq_index, value in enumerate(cpu_interrupts[cpu_index]):
+                    cumulative_interrupts[cpu_index][irq_index] += value
+
+            if threshold is not None:
+                display_filtered_interrupts(cumulative_interrupts, threshold)
+            else:
+                display_interrupts(cpu_interrupts.keys(), cpu_interrupts)
+    except KeyboardInterrupt:
+        print("\nStopping continuous sampling...")
+
+
+def display_interrupts(cpu_names, cpu_interrupts):
+    """
+    Displays interrupt data for all CPUs.
+
+    :param cpu_names: List of CPU headers.
+    :param cpu_interrupts: Dictionary of CPU interrupt data.
+    """
     for cpu_index in range(len(cpu_interrupts)):
-        # Print CPU row
         print(f"CPU{cpu_index}: ", end='')
         for irq_index in range(len(cpu_interrupts[cpu_index])):
             print(f"{cpu_interrupts[cpu_index][irq_index]:<8}", end='')
         print()
 
 
+def display_filtered_interrupts(cumulative_interrupts, threshold):
+    """
+    Displays interrupt data with filtering based on a logarithmic threshold.
+    Rows with all values below the threshold are excluded.
+
+    So value close in log scale are displayed value very far
+    i.e 5 intrupts vs 5 000 000 ( we really don't care about 5)
+
+    :param cumulative_interrupts: Cumulative interrupt data over time.
+    :param threshold: Logarithmic threshold for filtering minor interrupts.
+    """
+    print("\nFiltered Interrupts:")
+    for cpu_index in cumulative_interrupts:
+        filtered_row = []
+        significant_values = False
+
+        for irq_index, value in enumerate(cumulative_interrupts[cpu_index]):
+            if value > 0 and math.log10(value) >= threshold:
+                filtered_row.append(f"{value:<8}")
+                significant_values = True
+            else:
+                filtered_row.append("0       ")
+
+        if significant_values:
+            print(f"CPU{cpu_index}: ", end='')
+            print(''.join(filtered_row))
+
+
 if __name__ == "__main__":
-    # Set up argument parsing
     parser = argparse.ArgumentParser(description="Monitor interrupts for a specific interface.")
     parser.add_argument('-i', '--interface', type=str, default='direct', help='Interface name (e.g., direct, eth0)')
     parser.add_argument('-t', '--time', type=int, default=5, help='Sampling period in seconds')
+    parser.add_argument('-c', '--continuous', action='store_true', help='Enable continuous sampling mode')
+    parser.add_argument('-l', '--log-threshold', type=float, default=None,
+                        help='Log scale threshold for filtering interrupts')
     args = parser.parse_args()
-    sample_interrupts(interface=args.interface, period=args.time)
 
+    if args.continuous:
+        continuous_sampling(interface=args.interface, period=args.time, threshold=args.log_threshold)
+    else:
+        sample_interrupts(interface=args.interface, period=args.time)
