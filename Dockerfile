@@ -147,9 +147,11 @@
   ## docker buildx build --platform linux/amd64 MESON_ARGS="-Dplatform=generic" -t cnfdemo.io/spyroot/dpdk_generic_tester:latest .
 
 FROM spyroot/pktgen_toolbox_generic:latest
-RUN yum install -y gcc make git libpcap-devel rpm go ncurses-devel rsync && \
+RUN yum install -y gcc make git libpcap-devel rpm go ncurses-devel rsync procps-ng procps-ng-devel && \
     yum clean all && \
     rm -rf /var/cache/yum /root/*.tar.gz /root/*.zip /tmp/* /usr/share/doc/*
+
+#procps \
 
 ENV GOMAXPROCS=$(nproc)
 ENV GO111MODULE=on
@@ -298,6 +300,7 @@ COPY cyclictest_per_thread.py /
 COPY histogram_plot_per_thead.py /
 COPY fio_test.sh /
 COPY dhry2reg_test.sh /
+COPY start_sonobuoy.sh /
 
 WORKDIR /root
 

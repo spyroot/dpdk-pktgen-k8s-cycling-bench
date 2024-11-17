@@ -1,0 +1,1 @@
+kube-bench --config-dir /home/capv/.kube/cfg -v 4 --version 1.30
