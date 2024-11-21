@@ -61,12 +61,16 @@
 #     the starting core when the end is reached.
 #
 # Default values
-
+iface="direct"
+if_vf_sriov="sriov"
+start_core=12
+end_core=19
 
 iface="direct"
 if_vf_sriov="sriov"
 start_core=12
 end_core=19
+rps_sock_flow_entries=32768  # Default total RPS entries
 
 function usage() {
     echo "Usage: $0 [pool|core] [options]"
@@ -75,6 +79,7 @@ function usage() {
     echo "  -p | --prefix <vf_prefix>      Specify SRIOV VF prefix (default: sriov)"
     echo "  -s | --start-core <start>      Specify starting core (default: 12)"
     echo "  -e | --end-core <end>          Specify ending core (default: 19)"
+    echo "  -r | --rps-entries <entries>   Specify total rps_sock_flow_entries (default: 32768)"
     echo "  -h | --help                    Display this help message"
     echo ""
     echo "Modes:"
@@ -109,6 +114,10 @@ while [[ $# -gt 0 ]]; do
             end_core=$2
             shift 2
             ;;
+        -r|--rps-entries)
+            rps_sock_flow_entries=$2
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -139,20 +148,33 @@ function display_xps_cpus() {
     echo "Displaying XPS settings for interface: $interface"
     for queue in /sys/class/net/"$interface"/queues/tx-*; do
         echo -n "$(basename "$queue"): "
-        cat "$queue"/xps_cpus
+        cat "$queue"/xps_cpus 2>/dev/null || echo "No settings found"
+    done
+}
+
+function configure_rps_flow_cnt() {
+    local interface=$1
+    local total_rx_queues=$(ls -d /sys/class/net/"$iface"/queues/rx-* | wc -l)
+    local flow_cnt=$((rps_sock_flow_entries / total_rx_queues))
+
+    echo "Configuring rps_flow_cnt for $total_rx_queues RX queues on interface: $interface"
+    for queue in /sys/class/net/"$interface"/queues/rx-*; do
+        echo "$flow_cnt" > "$queue/rps_flow_cnt" 2>/dev/null || echo "Failed to configure $queue"
+        echo "Configured $(basename "$queue") with rps_flow_cnt=$flow_cnt"
     done
 }
 
 function tx_pool_per_txq() {
+    local interface=$1
     cpu_mask=$(range_to_mask "$start_core" "$end_core")
     echo "Calculated CPU mask: $cpu_mask"
 
-    for queue in /sys/class/net/"$iface"/queues/tx-*; do
-        echo "$cpu_mask" > "$queue"/xps_cpus || echo "Failed to assign $queue"
+    for queue in /sys/class/net/"$interface"/queues/tx-*; do
+        echo "$cpu_mask" > "$queue"/xps_cpus 2>/dev/null || echo "Failed to assign $queue"
         echo "Assigned $(basename "$queue") to CPUs $start_core-$end_core"
     done
 
-    display_xps_cpus "$iface"
+    display_xps_cpus "$interface"
 }
 
 function tx_per_core() {
@@ -161,39 +183,28 @@ function tx_per_core() {
 
     local cpu=$start_cpu
     for queue in /sys/class/net/"$interface"/queues/tx-*; do
-        local mask=$(cpu_to_mask $cpu)
-        echo "$mask" > "$queue"/xps_cpus || echo "Failed to assign $queue"
+        local mask=$(cpu_to_mask "$cpu")
+        echo "$mask" > "$queue"/xps_cpus 2>/dev/null || echo "Failed to assign $queue"
         echo "Assigned $(basename "$queue") to CPU $cpu"
         ((cpu++))
+        if ((cpu > end_core)); then
+            cpu=$start_core
+        fi
     done
 
     display_xps_cpus "$interface"
 }
 
-function process_sriov_vfs() {
-    local mode=$1
-    for vf_iface in $(ip link show | grep $if_vf_sriov | awk -F': ' '{print $2}'); do
-        if [[ "$mode" == "pool" ]]; then
-            tx_pool_per_txq "$vf_iface"
-        elif [[ "$mode" == "core" ]]; then
-            tx_per_core "$vf_iface" "$start_core"
-        else
-            echo "Unknown mode: $mode"
-        fi
-    done
-}
-
+# Main script execution
 if [[ "$mode" == "pool" ]]; then
+    echo "Applying pool mode to interface: $iface"
+    configure_rps_flow_cnt "$iface"
     tx_pool_per_txq "$iface"
 elif [[ "$mode" == "core" ]]; then
+    echo "Applying core mode to interface: $iface"
+    configure_rps_flow_cnt "$iface"
     tx_per_core "$iface" "$start_core"
 else
     echo "Invalid mode: $mode. Please use 'pool' or 'core'."
     exit 1
 fi
-
-process_sriov_vfs "$mode"
-
-for vf_iface in $(ip link show | grep "$if_vf_sriov" | awk -F': ' '{print $2}'); do
-    display_xps_cpus "$vf_iface"
-done
