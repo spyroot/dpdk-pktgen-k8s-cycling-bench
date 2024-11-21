@@ -1,13 +1,11 @@
 #!/bin/bash
-#!/bin/bash
-# Author: Mus spyroot@gmail.com
 #
 # This script automates network performance testing using iperf3 under various
 # Linux kernel scheduler policies (SCHED_RR, SCHED_FIFO, SCHED_OTHER, etc.).
 # It can operate in two modes: server and client. The script also supports
 # single-core and multi-core configurations for testing scenarios.
 #
-# Key Features:
+# Features:
 # 1. Scheduler Policy Adjustment: Modify the scheduling policy of processes
 #    using `chrt` (e.g., SCHED_RR, SCHED_FIFO).
 # 2. Core Affinity: Use `taskset` to pin server and client processes to specific CPU cores.
@@ -34,6 +32,8 @@
 # - SERVER_IP: IP address for the server (default: 172.16.222.158)
 # - CLIENT_IP: IP address for the client (default: 172.16.222.124)
 
+#
+# Author: Mus spyroot@gmail.com
 
 # Scheduler and core options
 shed="-f"  # Default scheduler policy is FIFO
