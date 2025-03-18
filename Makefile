@@ -2,6 +2,10 @@ IMAGE_NAME = spyroot/dpdk-pktgen-k8s-cycling-bench
 DOCKER_TAG = latest
 ARCHS = amd64 arm64
 
+# export DOCKER_BUILDKIT=0
+# export COMPOSE_DOCKER_CLI_BUILD=0
+# export DOCKER_DEFAULT_PLATFORM=linux/amd64
+
 all: build
 
 build: $(ARCHS)
