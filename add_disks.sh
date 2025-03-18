@@ -12,7 +12,6 @@ DEFAULT_DISK_NUM="3"
 
 GOVC_CONFIG_FILE="$HOME/.govc_config"
 
-# Arguments with overrides
 CLUSTER_NAME=${1:-$DEFAULT_CLUSTER}
 DISK_SIZE=${2:-$DEFAULT_DISK_SIZE}
 NUM_DISKS=${2:-DEFAULT_DISK_NUM}
@@ -29,7 +28,7 @@ function usage() {
     exit 1
 }
 
-# Function to install govc if not present
+# Function to install govc if not present, we need that , so we can adjust VM.
 function install_govc() {
     if command -v govc &> /dev/null; then
         echo "✅ govc is already installed."
@@ -92,22 +91,19 @@ EOF
     echo "✅ vCenter credentials saved!"
 }
 
-# Ensure govc and kubectl are installed
+# Ensure govc and kubectl are installed, read why ^
 install_govc
 install_kubectl
-
-# Configure vCenter if not set up
 configure_vc
 
-# Verify that govc is working
 if ! govc about &>/dev/null; then
     echo "❌ Error: Unable to connect to vCenter. Please check your credentials."
     exit 1
 fi
 
 echo "✅ Successfully connected to vCenter."
-
-# Get all worker nodes (exclude control-plane nodes)
+# Get all worker nodes (exclude control-plane nodes), if you need add disk to limited
+# ( you can add filter here)
 echo "🔍 Retrieving worker nodes..."
 WORKER_NODES=$(kubectl get nodes --no-headers | grep -v "control-plane" | awk '{print $1}')
 
@@ -119,6 +115,8 @@ fi
 echo "✅ Worker nodes found:"
 echo "$WORKER_NODES"
 
+# We resolve datastore based on where first disk is
+# i.e if VM uses local disk you might have million DSs you need indicate which one for disk create.
 function get_vm_datastore() {
     local VM_NAME=$1
 
@@ -167,7 +165,6 @@ for NODE in $WORKER_NODES; do
         govc vm.power -off "$VM_NAME"
         sleep 3
 
-        # Verify the VM is off
         if govc vm.info "$VM_NAME" | grep -q "Powered on"; then
             echo "❌ VM $VM_NAME did not power off. Skipping disk addition."
             continue
@@ -177,7 +174,6 @@ for NODE in $WORKER_NODES; do
         echo "🔌 VM $VM_NAME is already powered off."
     fi
 
-    # Verify VM is powered off
     if govc vm.info "$VM_NAME" | grep -q "Powered on"; then
         echo "❌ VM $VM_NAME did not power off. Skipping disk addition."
         continue
@@ -185,7 +181,7 @@ for NODE in $WORKER_NODES; do
     echo "✅ VM $VM_NAME is powered off."
 
 
-    # Add multiple disks
+    # this one loop and add all disks
     for ((i=1; i<=NUM_DISKS; i++)); do
         echo "💾 Adding disk #$i of size ${DISK_SIZE}GB to VM: $VM_NAME on datastore [$DATASTORE]"
         DISK_NAME="${VM_NAME}-extra-disk-${i}-$(date +%s).vmdk"
@@ -195,12 +191,6 @@ for NODE in $WORKER_NODES; do
             -ds="$DATASTORE"
         sleep 2
     done
-
-    # Add a new disk
-    echo "💾 Adding a ${DISK_SIZE}GB disk to VM: $VM_NAME datastore $DATASTORE"
-    DISK_NAME="${VM_NAME}-extra-disk-$(date +%s).vmdk"
-    govc vm.disk.create -vm "$VM_NAME" -name "$DISK_NAME" -size "${DISK_SIZE}G" -ds="$DATASTORE"
-    sleep 5
 
     # Power on the VM
     echo "🔌 Powering on VM: $VM_NAME"
