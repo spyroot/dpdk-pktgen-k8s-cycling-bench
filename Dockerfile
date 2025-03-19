@@ -300,7 +300,7 @@ COPY cyclictest_per_thread.py /
 COPY histogram_plot_per_thead.py /
 COPY fio_test.sh /
 COPY dhry2reg_test.sh /
-COPY start_sonobuoy.sh /
+COPY sonobuoy_deploy.sh /
 COPY bench/run_bench.sh /
 
 WORKDIR /root
