@@ -21,16 +21,16 @@
 #
 # Mus spyroot@gmail.com
 
-STORAGE_CLASS="local-storage"
+STORAGE_CLASS="fast-disks"
 CAPACITY="50Gi"
 ACCESS_MODES="ReadWriteOnce"
 VOLUME_MODE="Filesystem"
-RECLAIM_POLICY="Retain"
+RECLAIM_POLICY="Delete"
 BASE_PATH="/mnt/local-storage"
 NUM_PVS=6
 
 
-create_storage_class() {
+function create_storage_class() {
   if ! kubectl get storageclass "$STORAGE_CLASS" &>/dev/null; then
     echo "Creating StorageClass '$STORAGE_CLASS'..."
     cat <<EOF | kubectl apply -f -
@@ -39,7 +39,7 @@ kind: StorageClass
 metadata:
   name: $STORAGE_CLASS
   annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
+    storageclass.kubernetes.io/is-default-class: "true"
 provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: $RECLAIM_POLICY
@@ -57,7 +57,7 @@ NODES=$(kubectl get nodes --selector='!node-role.kubernetes.io/control-plane,!no
 for NODE in $NODES; do
   for i in $(seq 1 $NUM_PVS); do
     PV_NAME="local-pv-${NODE}-${i}"
-    LOCAL_PATH="${BASE_PATH}/pvc${i}"
+    LOCAL_PATH="${BASE_PATH}/pv${i}"
 
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
