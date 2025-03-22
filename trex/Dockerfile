@@ -274,7 +274,7 @@ RUN git clone https://gitlab.freedesktop.org/libbsd/libbsd.git /root/libbsd \
 RUN git clone https://github.com/pktgen/Pktgen-DPDK.git /root/Pktgen-DPDK \
     && cd /root/Pktgen-DPDK \
     && git checkout ${PKTGEN_VERSION} \
-    && ./tools/pktgen-build.sh build \
+    && ./tools/pktgen-build.sh build buildlua \
     && ninja -C /root/Pktgen-DPDK/Builddir install \
     && rm -rf /root/Pktgen-DPDK
 
@@ -288,7 +288,7 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
     && make install \
     && rm -rf /root/nasm
 
-# in order to plot
+# in order to plot.py
 RUN pip install --no-cache-dir matplotlib numpy
 RUN pip show matplotlib && pip show numpy
 RUN /root/miniconda/bin/conda install -y matplotlib numpy

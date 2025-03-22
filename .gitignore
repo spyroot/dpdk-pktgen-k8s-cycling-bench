@@ -6,3 +6,12 @@
 
 # Ignore .idea directory (for JetBrains IDEs like PyCharm)
 .idea/
+
+old*
+flow/*
+
+*.npz
+*.lua
+*.log
+/pkt_generation/pods/
+/pkt_generation/flows/

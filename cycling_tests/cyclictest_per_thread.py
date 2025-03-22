@@ -69,11 +69,11 @@ def plot_latency_data(thread_counts, filename, num_threads, max_latencies, avg_l
     """
     Plot latency data for each thread.
     :param thread_counts: List of lists containing latency counts for each thread.
-    :param filename: Filename to save the plot as.
+    :param filename: Filename to save the plot.py as.
     :param num_threads: Number of threads used in the test.
     :param max_latencies: List of max latencies for each thread.
     :param avg_latencies: List of average latencies for each thread.
-    :param output_directory: Directory to save the plot.
+    :param output_directory: Directory to save the plot.py.
     """
     fig, ax = plt.subplots(figsize=(12, 8), dpi=150)
     colors = generate_colors(num_threads)

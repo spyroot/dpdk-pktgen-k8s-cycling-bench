@@ -288,7 +288,7 @@ RUN git clone https://github.com/netwide-assembler/nasm.git /root/nasm \
     && make install \
     && rm -rf /root/nasm
 
-# in order to plot
+# in order to plot.py
 RUN pip install --no-cache-dir matplotlib numpy
 RUN pip show matplotlib && pip show numpy
 RUN /root/miniconda/bin/conda install -y matplotlib numpy
@@ -296,8 +296,8 @@ RUN /root/miniconda/bin/conda install -y matplotlib numpy
 COPY stress-ng_cpu_bench.sh /
 COPY sysbench_stress.sh /
 COPY cyclictest_plot.sh /
-COPY cyclictest_per_thread.py /
-COPY histogram_plot_per_thead.py /
+COPY cycling_tests/cyclictest_per_thread.py /
+COPY cycling_tests/histogram_plot_per_thead.py /
 COPY fio_test.sh /
 COPY dhry2reg_test.sh /
 COPY sonobuoy_deploy.sh /
