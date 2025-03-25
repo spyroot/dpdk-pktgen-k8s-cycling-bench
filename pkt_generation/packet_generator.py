@@ -441,9 +441,16 @@ def get_pods(
     return tx_pods, rx_pods
 
 
-def get_mac_address(pod_name: str) -> str:
-    """Extract MAC address from dpdk-testpmd inside a pod with env var
-    ."""
+def get_mac_address(
+        pod_name: str
+) -> str:
+    """Extract MAC address from dpdk-testpmd inside a pod with env var.
+
+    Note we always mask EAL via -a hence TX or RX pod see a single DPKD port.
+    All profile use VF's mac address that eliminates -P (promiscuous mode)
+    :param pod_name: tx0, tx1, rx0 etc pod name
+    :return: return dpkd interface mac
+    """
     shell_cmd = "dpdk-testpmd -a \\$PCIDEVICE_INTEL_COM_DPDK --"
     full_cmd = f"kubectl exec {pod_name} -- sh -c \"{shell_cmd}\""
     result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
@@ -452,8 +459,23 @@ def get_mac_address(pod_name: str) -> str:
     return match.group(0) if match else None
 
 
-def get_numa_cores(pod_name: str) -> str:
-    """Extract NUMA core bindings from numactl -s."""
+def get_numa_cores(
+        pod_name: str
+) -> str:
+    """Extract NUMA core bindings from numactl -s
+
+    We figure out how many core to use on TX or RX side from a numa topology.
+
+    i.e.
+
+    - if pod create 2 CPU , it single core test , we always need 1 core fas master core.
+    (read dpdk doc)
+
+    - if pod crate with 5 core  one for master 2 TX 2 for RX
+
+    :param pod_name:  tx0, tx1, rx0 etc pod name
+    :return:
+    """
     cmd = f"kubectl exec {pod_name} -- numactl -s"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
@@ -468,11 +490,11 @@ def collect_pods_related(
         rx_pods: List[str],
         collect_macs: bool = True
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
-    """From each TX and RX pod collect.lua port mac address and list of cores.
-
-    :param tx_pods:
-    :param rx_pods:
-    :param collect_macs:
+    """
+    From each TX and RX pod collect.lua port mac address and list of cores.
+    :param tx_pods: list of tx pods ( on same or distinct workers )
+    :param rx_pods:  list of rx pods ( on same or distinct workers )
+    :param collect_macs:  if set true will collect mac address for each DPKD interface
     :return:
     """
     tx_macs = []
@@ -502,40 +524,6 @@ def collect_pods_related(
             print(f"{pod}: MAC={rx_macs[i]}, NUMA={rx_numa[i]}")
 
     return tx_macs, rx_macs, tx_numa, rx_numa
-
-
-def main(cmd: argparse.Namespace) -> None:
-    """
-
-    :param cmd:
-    :return:
-    """
-    tx_pods, rx_pods = get_pods()
-    tx_macs, rx_macs, tx_numa, rx_numa = collect_pods_related(tx_pods, rx_pods)
-    os.makedirs("flows", exist_ok=True)
-
-    flow_counts = parse_int_list(cmd.flows)
-    rates = parse_int_list(cmd.rate)
-    pkt_sizes = parse_int_list(cmd.pkt_size)
-
-    for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
-        d = f"flows/{t}-{r}"
-        print(t, r, tx_mac, rx_mac, tx_numa, rx_numa)
-        os.makedirs(d, exist_ok=True)
-        for num_flows, rate, pkt_size in product(flow_counts, rates, pkt_sizes):
-            render_paired_lua_profile(
-                src_mac=tx_mac,
-                dst_mac=rx_mac,
-                base_src_ip=cmd.base_src_ip,
-                base_dst_ip=cmd.base_dst_ip,
-                base_src_port=cmd.base_src_port,
-                base_dst_port=cmd.base_dst_port,
-                rate=rate,
-                pkt_size=pkt_size,
-                num_flows=num_flows,
-                flow_mode=cmd.flow_mode,
-                output_dir=d
-            )
 
 
 def copy_flows_to_pods(
@@ -1059,6 +1047,38 @@ def render_paired_lua_profile(
         ))
     print(f"[✔] Generated: {output_file}")
 
+
+def main(cmd: argparse.Namespace) -> None:
+    """ main block
+    :param cmd:
+    :return:
+    """
+    tx_pods, rx_pods = get_pods()
+    tx_macs, rx_macs, tx_numa, rx_numa = collect_pods_related(tx_pods, rx_pods)
+    os.makedirs("flows", exist_ok=True)
+
+    flow_counts = parse_int_list(cmd.flows)
+    rates = parse_int_list(cmd.rate)
+    pkt_sizes = parse_int_list(cmd.pkt_size)
+
+    for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
+        d = f"flows/{t}-{r}"
+        print(t, r, tx_mac, rx_mac, tx_numa, rx_numa)
+        os.makedirs(d, exist_ok=True)
+        for num_flows, rate, pkt_size in product(flow_counts, rates, pkt_sizes):
+            render_paired_lua_profile(
+                src_mac=tx_mac,
+                dst_mac=rx_mac,
+                base_src_ip=cmd.base_src_ip,
+                base_dst_ip=cmd.base_dst_ip,
+                base_src_port=cmd.base_src_port,
+                base_dst_port=cmd.base_dst_port,
+                rate=rate,
+                pkt_size=pkt_size,
+                num_flows=num_flows,
+                flow_mode=cmd.flow_mode,
+                output_dir=d
+            )
 
 def discover_available_profiles(
 ) -> List[str]:
