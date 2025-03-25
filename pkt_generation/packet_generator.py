@@ -109,54 +109,247 @@ from itertools import product
 import re
 import numpy as np
 from datetime import datetime
+import logging
+import os
+import subprocess
+import tarfile
+from typing import List
+
+logging.basicConfig(
+    filename='pktgen.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger()
 
 # this out template
 LUA_UDP_TEMPLATE = """\
 package.path = package.path ..";?.lua;test/?.lua;app/?.lua;"
 require "Pktgen"
 
-pktgen.set("all", "rate", {rate});
-pktgen.mac_from_arp("on");
-pktgen.ping4("all");
-pktgen.prime("all");
-pktgen.screen("on");
+local pauseTime		= 1000;
 
-print("**** Execute Range test ********")
+local function collect_stats(a)
 
-pktgen.page("range")
+    for i = 1, a.iterations, 1 do
+        pktgen.delay(a.sleeptime)
+        p = pktgen.portStats(0, 'port')[0]
+        r = pktgen.portStats(0, 'rate')[0]
+    
+        print(
+            'opkts:', p.opackets,
+            'ipkts:', p.ipackets,
+            'oerr:', p.oerrors,
+            'ierr:', p.ierrors,
+            'miss:', p.imissed,
+            'nobuf:', p.rx_nombuf,
+            'obytes:', p.obytes,
+            'ibytes:', p.ibytes,
+            'tx_pps:', r.pkts_tx,
+            'rx_pps:', r.pkts_rx,
+            'tx_mbps:', r.mbits_tx,
+            'rx_mbps:', r.mbits_rx
+        )
+        
+    end
+    
+    return 0
+end
 
-pktgen.range.dst_mac("0", "start", "{dst_mac}")
-pktgen.range.src_mac("0", "start", "{src_mac}")
+local function collect_stats(a)
+    pktgen.stop(0);
+    pktgen.set("all", "rate", {rate});
+    pktgen.mac_from_arp("on");
+    pktgen.ping4("all");
+    pktgen.prime("all");
+    pktgen.screen("on");
+    
+    print("**** Execute Range test ********")
+    
+    pktgen.page("range")
+    
+    pktgen.range.dst_mac("0", "start", "{dst_mac}")
+    pktgen.range.src_mac("0", "start", "{src_mac}")
+    
+    pktgen.range.dst_ip("0", "start", "{dst_ip}")
+    pktgen.range.dst_ip("0", "inc", "{dst_ip_inc}")
+    pktgen.range.dst_ip("0", "min", "{dst_ip}")
+    pktgen.range.dst_ip("0", "max", "{dst_max_ip}")
+    
+    pktgen.range.src_ip("0", "start", "{src_ip}")
+    pktgen.range.src_ip("0", "inc", "{src_ip_inc}")
+    pktgen.range.src_ip("0", "min", "{src_ip}")
+    pktgen.range.src_ip("0", "max", "{src_max_ip}")
+    
+    pktgen.set_proto("0", "udp")
+    
+    pktgen.range.dst_port("0", "start", {dst_port})
+    pktgen.range.dst_port("0", "inc", {dst_port_inc})
+    pktgen.range.dst_port("0", "min", {dst_port})
+    pktgen.range.dst_port("0", "max", {dst_port_max})
+    
+    pktgen.range.src_port("0", "start", {src_port})
+    pktgen.range.src_port("0", "inc", {src_port_inc})
+    pktgen.range.src_port("0", "min", {src_port})
+    pktgen.range.src_port("0", "max", {src_port_max})
+    
+    pktgen.range.pkt_size("0", "start", {pkt_size})
+    pktgen.range.pkt_size("0", "inc", 0)
+    pktgen.range.pkt_size("0", "min", {pkt_size})
+    pktgen.range.pkt_size("0", "max", {pkt_size})
+    
+    pktgen.set_range("0", "on")
+    pktgen.delay(pauseTime)
+    
+    pktgen.page("rate")
+    pktgen.start(0)
+    pktgen.sleep(1)
+    
+    min_latency = collect_stats{{
+        sleeptime=60000,
+        iterations=1
+    }}
+    
+     p = pktgen.portStats(0, 'port')[0];
+     r = pktgen.portStats(0, 'rate')[0];
+        
+            print(
+                'opkts:', p.opackets,
+                'ipkts:', p.ipackets,
+                'oerr:', p.oerrors,
+                'ierr:', p.ierrors,
+                'miss:', p.imissed,
+                'nobuf:', p.rx_nombuf,
+                'obytes:', p.obytes,
+                'ibytes:', p.ibytes,
+                'tx_pps:', r.pkts_tx,
+                'rx_pps:', r.pkts_rx,
+                'tx_mbps:', r.mbits_tx,
+                'rx_mbps:', r.mbits_rx
+            )
+            
+    pktgen.stop(0);
+end
 
-pktgen.range.dst_ip("0", "start", "{dst_ip}")
-pktgen.range.dst_ip("0", "inc", "{dst_ip_inc}")
-pktgen.range.dst_ip("0", "min", "{dst_ip}")
-pktgen.range.dst_ip("0", "max", "{dst_max_ip}")
+function main()
+	file = io.open("RFC2544_throughput_results.txt", "w");
+	setupTraffic();
+	for _,size in pairs(pkt_sizes)
+	do
+		runThroughputTest(size);
+	end
+	file:close();
+end
 
-pktgen.range.src_ip("0", "start", "{src_ip}")
-pktgen.range.src_ip("0", "inc", "{src_ip_inc}")
-pktgen.range.src_ip("0", "min", "{src_ip}")
-pktgen.range.src_ip("0", "max", "{src_max_ip}")
+main();
+"""
 
-pktgen.set_proto("0", "udp")
+# unused for now,
+# modification required.
+# A) in pod template we attac h 2 port vs 1
+# B) in cmd we need accept type of test
+# C) we need resolve both PCI addr and pass ( i.e same semantic as per pair unidirectional )
+# D) we switch to this template
+# E) We add type of test loop convergence.
+#
+# Note the same test technically we can do with two pod on two different worker
+# if we loopback pkt back.
+LUA_UDP_CONVERGENCE_TEMPLATE = """\
+package.path = package.path ..";?.lua;test/?.lua;app/?.lua;../?.lua"
+require "Pktgen";
 
-pktgen.range.dst_port("0", "start", {dst_port})
-pktgen.range.dst_port("0", "inc", {dst_port_inc})
-pktgen.range.dst_port("0", "min", {dst_port})
-pktgen.range.dst_port("0", "max", {dst_port_max})
+local pkt_sizes		= { 64, 128, 256, 512, 1024, 1280, 1518, 2000, 9000 };
 
-pktgen.range.src_port("0", "start", {src_port})
-pktgen.range.src_port("0", "inc", {src_port_inc})
-pktgen.range.src_port("0", "min", {src_port})
-pktgen.range.src_port("0", "max", {src_port_max})
+local duration         = {duration};
+local confirmDuration  = {confirm_duration};
+local pauseTime        = {pause_time};
 
-pktgen.range.pkt_size("0", "start", {pkt_size})
-pktgen.range.pkt_size("0", "inc", 0)
-pktgen.range.pkt_size("0", "min", {pkt_size})
-pktgen.range.pkt_size("0", "max", {pkt_size})
+local sendport         = "{send_port}";
+local recvport         = "{recv_port}";
 
-pktgen.set_range("0", "on")
-pktgen.start(0)
+local dstip		= "90.90.90.90";
+local srcip		= "1.1.1.1";
+local netmask		= "/24";
+
+local initialRate      = {initial_rate};
+
+local src_mac          = "{src_mac}";
+local dst_mac          = "{dst_mac}";
+
+local function setupTraffic()
+    pktgen.set_mac(sendport, "src", src_mac);
+    pktgen.set_mac(recvport, "dst", dst_mac);
+	pktgen.set_ipaddr(sendport, "dst", dstip);
+	pktgen.set_ipaddr(sendport, "src", srcip..netmask);
+	pktgen.set_ipaddr(recvport, "dst", srcip);
+	pktgen.set_ipaddr(recvport, "src", dstip..netmask);
+	pktgen.set_proto(sendport..","..recvport, "udp");
+	pktgen.set(sendport, "count", 0);
+end
+
+local function runTrial(pkt_size, rate, duration, count)
+
+	local num_tx, num_rx, num_dropped;
+	pktgen.clr();
+	pktgen.set(sendport, "rate", rate);
+	pktgen.set(sendport, "size", pkt_size);
+
+	pktgen.start(sendport);
+	file:write("Running trial " .. count .. ". % Rate: " .. rate .. ". Packet Size: " .. pkt_size .. ". Duration (mS):" .. duration .. "\n");
+	pktgen.delay(duration);
+	pktgen.stop(sendport);
+	pktgen.delay(pauseTime);
+	statTx = pktgen.portStats(sendport, "port")[tonumber(sendport)];
+	statRx = pktgen.portStats(recvport, "port")[tonumber(recvport)];
+	num_tx = statTx.opackets;
+	num_rx = statRx.ipackets;
+	num_dropped = num_tx - num_rx;
+
+	file:write("Tx: " .. num_tx .. ". Rx: " .. num_rx .. ". Dropped: " .. num_dropped .. "\n");
+	pktgen.delay(pauseTime);
+	return num_dropped;
+end
+
+local function runThroughputTest(pkt_size)
+	local num_dropped, max_rate, min_rate, trial_rate;
+
+	max_rate = 100;
+	min_rate = 1;
+	trial_rate = initialRate;
+	for count=1, 10, 1
+	do
+		num_dropped = runTrial(pkt_size, trial_rate, duration, count);
+		if num_dropped == 0
+		then
+			min_rate = trial_rate;
+		else
+			max_rate = trial_rate;
+		end
+		trial_rate = min_rate + ((max_rate - min_rate)/2);
+	end
+
+	trial_rate = min_rate;
+	num_dropped = runTrial(pkt_size, trial_rate, confirmDuration, "Confirmation");
+	if num_dropped == 0
+	then
+		file:write("Max rate for packet size "  .. pkt_size .. "B is: " .. trial_rate .. "\n\n");
+	else
+		file:write("Max rate of " .. trial_rate .. "% could not be confirmed for 60 seconds as required by rfc2544." .. "\n\n");
+	end
+end
+
+function main()
+	file = io.open("convergence_test.txt", "w");
+	setupTraffic();
+	for _,size in pairs(pkt_sizes)
+	do
+		runThroughputTest(size);
+	end
+	file:close();
+end
+
+main();
 """
 
 
@@ -275,7 +468,7 @@ def collect_pods_related(
         rx_pods: List[str],
         collect_macs: bool = True
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
-    """From each TX and RX pod collect port mac address and list of cores.
+    """From each TX and RX pod collect.lua port mac address and list of cores.
 
     :param tx_pods:
     :param rx_pods:
@@ -330,7 +523,7 @@ def main(cmd: argparse.Namespace) -> None:
         print(t, r, tx_mac, rx_mac, tx_numa, rx_numa)
         os.makedirs(d, exist_ok=True)
         for num_flows, rate, pkt_size in product(flow_counts, rates, pkt_sizes):
-            generate_lua_scripts(
+            render_paired_lua_profile(
                 src_mac=tx_mac,
                 dst_mac=rx_mac,
                 base_src_ip=cmd.base_src_ip,
@@ -347,26 +540,46 @@ def main(cmd: argparse.Namespace) -> None:
 
 def copy_flows_to_pods(
         tx_pods: List[str],
-        rx_pods: List[str]) -> None:
-    """Copy generated Lua flows into each TX pod based on flow directory names."""
+        rx_pods: List[str]
+) -> None:
+    """Copy all .lua files from flow directories to corresponding TX pods in one go.
+
+    :param tx_pods:  List of str for pod name
+    :param rx_pods:  List of str for pod name
+    :return:
+    """
     for tx, rx in zip(tx_pods, rx_pods):
         flow_dir = f"flows/{tx}-{rx}"
         if os.path.exists(flow_dir):
-            for file in os.listdir(flow_dir):
-                src_path = os.path.join(flow_dir, file)
-                dst_path = f"{tx}:/"
-                print(f"📤 Copying {src_path} to {dst_path}")
-                subprocess.run(f"kubectl cp {src_path} {dst_path}", shell=True, check=True)
+            tar_path = f"/tmp/{tx}-{rx}.tar"
+            with tarfile.open(tar_path, "w") as tar:
+                for file in os.listdir(flow_dir):
+                    if file.endswith(".lua"):
+                        full_path = os.path.join(flow_dir, file)
+                        tar.add(full_path, arcname=file)
+
+            print(f"📦 Copying {tar_path} to pod {tx}")
+            subprocess.run(f"kubectl cp {tar_path} {tx}:/tmp/", shell=True, check=True)
+
+            # Extract inside pod
+            print(f"📂 Extracting files inside {tx}")
+            subprocess.run(f"kubectl exec {tx} -- tar -xf /tmp/{tx}-{rx}.tar -C /", shell=True, check=True)
+
+            # Optionally remove the tar file
+            os.remove(tar_path)
         else:
-            print(f"Warning: Flow directory {flow_dir} does not exist.")
+            print(f"⚠️ Warning: Flow directory {flow_dir} does not exist.")
 
 
 def move_pktgen_lua_inside_pods(
         tx_pods: List[str]
 ) -> None:
-    """Copy Pktgen.lua inside each TX pod from
-    /root/Pktgen-DPDK/ to /usr/local/bin/."""
-
+    """
+    Copy Pktgen.lua inside each TX pod from
+    /root/Pktgen-DPDK/ to /usr/local/bin/.
+    :param tx_pods:
+    :return:
+    """
     for tx in tx_pods:
         print(f"📦 Copying Pktgen.lua")
         cmd = f"kubectl exec {tx} -- cp /root/Pktgen-DPDK/Pktgen.lua /usr/local/bin/"
@@ -409,7 +622,7 @@ def main_generate(
         print(f"📂 Generating flows in {flow_dir}")
 
         for flow, rate, size in product(flow_counts, rates, pkt_sizes):
-            generate_lua_scripts(
+            render_paired_lua_profile(
                 src_mac=tx_mac,
                 dst_mac=rx_mac,
                 base_src_ip=cmd.base_src_ip,
@@ -444,7 +657,7 @@ def start_testpmd_on_rx_pods(
 
         duration = max(int(cmd.duration) - 2, 5)  # ensure at least 5s run
         testpmd_cmd = (
-            f"timeout {duration} dpdk-testpmd -l {cores_str} -n 4 --socket-mem 2048 "
+            f"timeout {duration + 5} dpdk-testpmd -l {cores_str} -n 4 --socket-mem 2048 "
             f"--proc-type auto --file-prefix testpmd_rx "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
             f"-- --forward-mode=rxonly --auto-start --stats-period 1 > /output/stats.log 2>&1 &"
@@ -452,8 +665,8 @@ def start_testpmd_on_rx_pods(
 
         kubectl_cmd = f"kubectl exec {pod} -- sh -c '{testpmd_cmd}'"
         print(f"🚀 [INFO] Starting testpmd on {pod} with cores: {cores_str}")
-        subprocess.run(kubectl_cmd, shell=True)
 
+        subprocess.run(kubectl_cmd, shell=True)
         time.sleep(2)
 
         proc_running = subprocess.run(
@@ -477,35 +690,136 @@ def start_testpmd_on_rx_pods(
         return cores_str
 
 
+def sample_pktgen_stats_via_socat(
+        pod: str,
+        cmd: argparse.Namespace,
+        pkt_file: str = '/tmp/pkt_stats.csv',
+        rate_file: str = '/tmp/port_rate_stats.csv',
+        port_file: str = '/tmp/port_stats.csv',
+        port: str = '22022'):
+    """Sample stats from pktgen using socat as control channel
+    and store them in a file."""
+    print(f"[🧪] Sampling stats from Pktgen on pod {pod}")
+    lua_script = (
+        "local ts = os.date('!%Y-%m-%dT%H:%M:%S'); "
+
+        "local rate = pktgen.portStats(0, 'rate'); "
+        f"if rate and rate[0] then "
+        f"local f1 = io.open('{rate_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(rate[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f1:write(str:sub(1, -2), '\\n'); f1:close(); end; "
+
+        "local pkt = pktgen.pktStats(0)[0]; "
+        f"if pkt then "
+        f"local f2 = io.open('{pkt_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(pkt) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f2:write(str:sub(1, -2), '\\n'); f2:close(); end; "
+
+        "local port = pktgen.portStats(0, 'port'); "
+        f"if port and port[0] then "
+        f"local f3 = io.open('{port_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(port[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f3:write(str:sub(1, -2), '\\n'); f3:close(); end; "
+    )
+    socat_cmd = f"echo \"{lua_script}\" | socat - TCP4:localhost:{port}"
+
+    kubectl_cmd = [
+        "kubectl", "exec", "-it", pod, "--",
+        "sh", "-c", socat_cmd
+    ]
+
+    subprocess.run(kubectl_cmd)
+    print(f"[🧪] Extended stats sample complete for pod {pod}.")
+
+
+def read_pktgen_stats(
+        pod: str,
+        file_name: str = '/tmp/pktgen_stats_output.txt'
+):
+    """Read the collected stats from the file and print them."""
+    print(f"[🧪] Reading stats from {file_name} on pod {pod}")
+    # Read the stats file
+    read_cmd = [
+        "kubectl", "exec", "-it", pod, "--",
+        "cat", file_name
+    ]
+    result = subprocess.run(read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        print(f"[🧪] Stats from pod {pod}:")
+        print(result.stdout.decode())
+    else:
+        print(f"[ERROR] Failed to read stats from pod {pod}: {result.stderr.decode()}")
+
+
 def start_pktgen_on_tx_pods(
         tx_pods: List[str],
         tx_numa: List[str],
         cmd: argparse.Namespace
 ) -> str:
-    """Start pktgen inside each TX pod using the specified profile in interactive mode.
-    :param tx_pods:  a tx pod name from which to start pktgen
-    :param tx_numa: a list of core from numa node that given tx pods can provide.
-    :param cmd: args for generation.
-    :return: number of core used for generation.
+    """
+    Start pktgen inside each TX pod using the specified profile in interactive mode.
+
+    The logic for starting pktgen is as follows:
+
+    1. Start pktgen with the -f flag, where the argument is a Lua script file (i.e., profile).
+    2. The Lua script will start the pktgen tester without blocking the execution.
+    3. We use Kubernetes (K8s) to sample data from pktgen via the socket interface during the specified duration.
+    4. We collect stats over a few intervals for the duration.
+    5. After the duration completes, we gracefully stop the pktgen traffic by sending the stop command to the port.
+    6. A timeout (`cmd.duration + X`) is used to ensure pktgen is killed sometime in the future, so it is terminated correctly.
+
+    :param tx_pods: A list of TX pod names from which to start pktgen.
+    :param tx_numa: A list of core assignments from NUMA nodes that the given TX pods can provide.
+    :param cmd: Command arguments for packet generation.
+    :return: The list of cores used for the pktgen generation.
     """
     for i, pod in enumerate(tx_pods):
+
         numa_cores = tx_numa[i].strip().split()
+        # for single core test, we need 2 core one for --master to collect stats.
         if len(numa_cores) < 2:
             print(f"[WARNING] Pod {pod} does not have enough NUMA cores.")
             continue
 
-        # Use core 0 and 1 if available, or fallback to first two
-        core_list = ",".join(numa_cores[:2])
-        main_core = numa_cores[1]
+        # Single core test: If only two cores are available, use them for TX and RX
+        main_core = numa_cores[0]
+        if len(numa_cores) == 2:
+            all_core_list = ",".join(numa_cores)
+            tx_cores = rx_cores = numa_cores[1]
+        else:
+            total_cores = len(numa_cores)
+            txrx_cores = (total_cores - 1) // 2
+            if txrx_cores % 2 != 0:
+                txrx_cores -= 1
+
+            # it should be sorted but we handle a case if it not.
+            tx_cores = sorted([numa_cores[i + 1] for i in range(txrx_cores)])
+            rx_cores = sorted([numa_cores[txrx_cores + 1 + i] for i in range(txrx_cores)])
+
+            tx_core_range = f"{tx_cores[0]}-{tx_cores[-1]}" if len(tx_cores) > 1 else f"{tx_cores[0]}"
+            rx_core_range = f"{rx_cores[0]}-{rx_cores[-1]}" if len(rx_cores) > 1 else f"{rx_cores[0]}"
+            tx_cores = tx_core_range
+            rx_cores = rx_core_range
+
         lua_script_path = f"/{cmd.profile}"
+        check_script_cmd = f"kubectl exec -it {pod} -- sh -c 'test -s /{cmd.profile}'"
+        result = subprocess.run(check_script_cmd, shell=True)
+        if result.returncode != 0:
+            print(f"❌ [ERROR] Lua script {lua_script_path} does not exist or is empty in pod {pod}. Skipping this pod.")
+            continue
+
+        subprocess.run(f"kubectl exec -it {pod} -- rm -f /tmp/*.csv", shell=True)
 
         pktgen_cmd = (
-            f"cd /usr/local/bin; timeout {cmd.duration} pktgen --no-telemetry -l "
-            f"{core_list} -n 4 --socket-mem {cmd.socket_mem} "
+            f"cd /usr/local/bin; timeout {cmd.duration + 5} pktgen --no-telemetry --log-level=7 -l  "
+            f"{all_core_list} -n 4 --socket-mem {cmd.socket_mem} --main-lcore {main_core} "
             f"--proc-type auto --file-prefix pg "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
-            f"-- -T --txd={cmd.txd} --rxd={cmd.rxd} "
-            f"-f {lua_script_path} -m [{main_core}:{main_core}].0"
+            f"-- -G --txd={cmd.txd} --rxd={cmd.rxd} "
+            f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0"
         )
 
         kubectl_cmd = [
@@ -513,11 +827,27 @@ def start_pktgen_on_tx_pods(
             "sh", "-c", pktgen_cmd
         ]
 
-        print(kubectl_cmd)
-        print(f"[🧪] Launching interactive Pktgen on {pod} with profile: {cmd.profile}")
-        subprocess.run(kubectl_cmd)
+        logger.info(f"Pktgen command: {pktgen_cmd}")
 
-        return core_list
+        print(f"[🧪] Launching interactive Pktgen on {pod} with profile: {cmd.profile}")
+
+        # we can technically run in thread note and redirect output
+        # subprocess.run(kubectl_cmd, shell=True)
+
+        pktgen_process = subprocess.Popen(kubectl_cmd)
+        sample_interval = cmd.sample_interval
+        sample_count = cmd.sample_count or int(cmd.duration / sample_interval)
+
+        for _ in range(sample_count):
+            sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
+            time.sleep(sample_interval)
+
+        stop_pktgen_cmd = f"echo 'pktgen.stop(0)' | socat - TCP4:localhost:{cmd.control_port}"
+        subprocess.run(f"kubectl exec -it {pod} -- {stop_pktgen_cmd}", shell=True)
+
+        pktgen_process.wait()
+        read_pktgen_stats(pod)
+        return all_core_list
 
 
 def stop_testpmd_on_rx_pods(rx_pods: List[str]) -> None:
@@ -622,7 +952,39 @@ def parse_int_list(csv: str) -> List[int]:
     return [int(v.strip()) for v in csv.split(",") if v.strip()]
 
 
-def generate_lua_scripts(
+def render_converge_lua_profile(
+        duration: int,
+        confirm_duration: int,
+        pause_time: int,
+        send_port: str,
+        recv_port: str,
+        src_ip: str,
+        dst_ip: str,
+        netmask: str,
+        initial_rate: int,
+        src_mac: str,
+        dst_mac: str
+) -> str:
+    """
+    Generate a Lua script for convergence testing using the given parameters.
+    :return: A formatted Lua script as a string.
+    """
+    return LUA_UDP_CONVERGENCE_TEMPLATE.format(
+        duration=duration,
+        confirm_duration=confirm_duration,
+        pause_time=pause_time,
+        send_port=send_port,
+        recv_port=recv_port,
+        src_ip=src_ip,
+        dst_ip=dst_ip,
+        netmask=netmask,
+        initial_rate=initial_rate,
+        src_mac=src_mac,
+        dst_mac=dst_mac
+    )
+
+
+def render_paired_lua_profile(
         src_mac: str,
         dst_mac: str,
         base_src_ip: str,
@@ -635,8 +997,21 @@ def generate_lua_scripts(
         flow_mode: str,
         output_dir: str
 ) -> None:
+    """Renders lua profiles, we take template and replace value based on what we need.
+    :param src_mac: a src mac that we resolve via kubectl from pod.
+    :param dst_mac: a dst mac that we resolve via kubectl from pod.
+    :param base_src_ip: base ip address of source pod.
+    :param base_dst_ip: base ip address of destination pod.
+    :param base_src_port: base port of source pod.
+    :param base_dst_port: base port of destination pod.
+    :param rate: rate of lua profile generation ( percentage from port speeed) - it rate cmd in pktgen
+    :param pkt_size: pkt size that we set via pktgen pkt size cmd.
+    :param num_flows: number of flows we want to generate.
+    :param flow_mode: flow mode.
+    :param output_dir: where to save data.
+    :return:
+    """
     os.makedirs(output_dir, exist_ok=True)
-
     base_src = ip_address(base_src_ip)
     base_dst = ip_address(base_dst_ip)
     src_port = int(base_src_port)
@@ -655,8 +1030,7 @@ def generate_lua_scripts(
     src_port_inc = 1 if "S" in flow_mode else 0
     dst_port_inc = 1 if "D" in flow_mode else 0
 
-    # Build descriptive filename
-    filename = f"flow_{num_flows}flows_{pkt_size}B_{rate}rate_{flow_mode}.lua"
+    filename = f"profile_{num_flows}_flows_pkt_size_{pkt_size}B_{rate}_rate_{flow_mode}.lua"
     output_file = os.path.join(output_dir, filename)
 
     with open(output_file, "w") as f:
@@ -686,8 +1060,11 @@ def generate_lua_scripts(
     print(f"[✔] Generated: {output_file}")
 
 
-def discover_available_profiles() -> List[str]:
-    """Scan 'flows' directory and return a list of available profile Lua files."""
+def discover_available_profiles(
+) -> List[str]:
+    """Scan 'flows' directory and return a list of available profile Lua files.
+    :return:  a list of profile, where profile is seperated lua file.
+    """
     profiles = set()
     if not os.path.exists("flows"):
         return []
@@ -728,7 +1105,6 @@ if __name__ == '__main__':
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-
     gen = subparsers.add_parser("generate_flow", help="🛠 Generate Pktgen Lua flows")
     gen.add_argument("--base-src-ip", default="192.168.1.1", help="Base source IP")
     gen.add_argument("--base-dst-ip", default="192.168.2.1", help="Base destination IP")
@@ -756,7 +1132,6 @@ if __name__ == '__main__':
         )
     )
 
-    # 🚀 start_generator subcommand
     start = subparsers.add_parser("start_generator", help="🚀 Start pktgen & testpmd using selected profile")
     start.add_argument("--txd", type=int, default=2048, help="🚀 TX (Transmit) descriptor count")
     start.add_argument("--rxd", type=int, default=2048, help="📡 RX (Receive) descriptor count")
@@ -767,6 +1142,15 @@ if __name__ == '__main__':
                             "(note if it should match the number of CPUs on a POD")
     start.add_argument("--rx_num_core", type=int, default=2,
                        help="🧠 number of core to use at receiver side.")
+    start.add_argument("--interactive", type=bool, default=False,
+                       help="run pktgen interactively.")
+
+    start.add_argument("--control-port", type=str, default="22022",
+                       help="🔌 Pktgen control port used for socat communication (default: 22022)")
+    start.add_argument("--sample-interval", type=int, default=10,
+                       help="📈 Interval (in seconds) between pktgen stat samples (default: 10s)")
+    start.add_argument("--sample-count", type=int, default=None,
+                       help="🔁 Number of samples to collect. If not set, will use duration/sample-interval")
 
     start.add_argument(
         "--skip-copy", action="store_true",
