@@ -16,4 +16,11 @@ It includes tools for system stress testing, network analysis, vulnerability sca
 To build the Docker image:
 ```bash
 docker build -t dpdk-pktgen-k8s-cycling-bench .
+```
+
+
+## Repo structure
+
+- **opt**: Scripts and tools related to node optimization.
+- **opt**: Scripts and tools related to traffic generation.
 
