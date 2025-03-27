@@ -198,6 +198,7 @@ The provided script allows you to create multiple tx and rx pod pairs, either on
 different nodes within the cluster.
 
 Prerequisites
+
 Before running the script, ensure the following:
 
 -- Kubernetes Cluster: A Kubernetes cluster is set up and you have access to it with the necessary privileges to create pods.
@@ -210,17 +211,18 @@ Container Image: Ensure the required container image is available in your regist
 
 ### Quick Start
 
-Download the Script: Download the provided bash script, which will create tx and rx pods for DPDK tests.
-Configure Your Cluster: Ensure that your Kubernetes cluster is ready with the necessary resources (DPDK or SR-IOV) available.
-Prepare the Pod Template: Place the pod-template.yaml in the same directory as the script.
-Run the Script: You can create tx and rx pod pairs using the following command:
-
+- Download the Script: Download the provided bash script, which will create tx and rx pods for DPDK tests.
+- Configure Your Cluster: Ensure that your Kubernetes cluster is ready with the necessary resources (DPDK or SR-IOV) available.
+- Prepare the Pod Template: Place the pod-template.yaml in the same directory as the script.
+- Run the Script: You can create tx and rx pod pairs using the following command:
 
 ```bash
 ./create_pods.sh -n <num_pairs> -c <cpu_cores> -m <mem_gb> -d <dpdk_count> -v <vf_count> -g <hugepages> -i <container_image> -s
 ```
 
 Options:
+
+```text
 -n <num_pairs>: The number of tx and rx pod pairs to create. Default is 3.
 -c <cpu_cores>: Number of CPU cores to allocate for each pod. Default is 2.
 -m <mem_gb>: Amount of memory to allocate for each pod (in GiB). Default is 2.
@@ -230,11 +232,12 @@ Options:
 -i <container_image>: The container image for the pods. Default is spyroot/dpdk-pktgen-k8s-cycling-bench-trex:latest-amd64.
 -s: Deploy tx and rx pods on the same node.
 --dry-run: Generate YAML files without applying them to the cluster (useful for inspection).
+```
 
+### Verify the Created Pods
 
-Verify the Created Pods: Once the script has run, you can check the created pods using the following commands:
-
-The pod creation script uses pod-template.yaml as a template for generating all the tx and rx pods.
+Once the script has run, you can check the created pods using the following commands:
+The pod creation script uses **pod-template.yaml** as a template for generating all the **txN** and **rxN** pods.
 Each pod is assigned one of two roles: either TX (transmit) or RX (receive).
 
 ```bash
@@ -242,7 +245,7 @@ kubectl get pods -l role=tx
 kubectl get pods -l role=rx
 ```
 
-Example Commands
+## Example Commands
 
 ### Example 1: Create 1 Pair of Pods on the Same Node with 4 CPU and 8Gi Memory. ( Check topologies below)
 
