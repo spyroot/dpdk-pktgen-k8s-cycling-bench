@@ -446,7 +446,7 @@ Events:                      <none>
 
 Replace <profile_name> with the appropriate Lua profile, and <test_duration> with the desired duration for the test in seconds.
 
-## Running the Script
+## Running the Script (short version)
 
 Once all dependencies are installed and the environment is set up,
 you can run the script using the following commands:
@@ -459,6 +459,117 @@ In order to start generated profile
 
 ```bash
 python packet_generator.py start_generator --profile <profile_name> --duration <test_duration>
+```
+
+## Detail view.
+
+The system supports multiple configurations, and the profiles are always unidirectional. 
+During the discovery phase, the system automatically identifies and matches the TX and RX pod pairs, 
+NUMA topology, and corresponding DPDK interfaces, along with their MAC addresses.
+
+```bash
+python packet_generator.py generate_flow --rate 10,50,100 --pkt-size 64,512,1500 --flows 1,100
+
+```
+For each pair of TX and RX pods, profiles are generated and saved under each corresponding pair’s directory.
+
+Example Directory Structure:
+
+✗ tree
+.
+├── tx0-rx0
+│   ├── profile_10000_flows_pkt_size_128B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_128B_10_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_1500B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_1500B_10_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_2000B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_2000B_10_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_512B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_512B_10_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_64B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_64B_10_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_9000B_100_rate_s.lua
+│   ├── profile_10000_flows_pkt_size_9000B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_128B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_128B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_1500B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_1500B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_2000B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_2000B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_512B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_512B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_64B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_64B_10_rate_s.lua
+│   ├── profile_100_flows_pkt_size_9000B_100_rate_s.lua
+│   ├── profile_100_flows_pkt_size_9000B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_128B_100_rate_s.lua
+│   ├── profile_1_flows_pkt_size_128B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_1500B_100_rate_s.lua
+│   ├── profile_1_flows_pkt_size_1500B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_2000B_100_rate_s.lua
+│   ├── profile_1_flows_pkt_size_2000B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_512B_100_rate_s.lua
+│   ├── profile_1_flows_pkt_size_512B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_64B_100_rate_s.lua
+│   ├── profile_1_flows_pkt_size_64B_100_rate_s.lua.backup
+│   ├── profile_1_flows_pkt_size_64B_10_rate_s.lua
+│   ├── profile_1_flows_pkt_size_9000B_100_rate_s.lua
+│   └── profile_1_flows_pkt_size_9000B_10_rate_s.lua
+
+You can note that in each lua file we source mac and destination mac, during this phase we only populate 
+require profiles.
+
+if we run , we can see that all profile post generation automatically discovered and we can consume any.
+for packet generation.
+
+```bash
+python packet_generator.py start_generator --help
+```
+
+```bash
+usage: packet_generator.py start_generator [-h] [--txd TXD] [--rxd RXD] [--warmup-duration WARMUP_DURATION] [--rx-socket-mem RX_SOCKET_MEM] [--tx-socket-mem TX_SOCKET_MEM]
+                                           [--tx_num_core TX_NUM_CORE] [--rx_num_core RX_NUM_CORE] [--interactive INTERACTIVE] [--control-port CONTROL_PORT]
+                                           [--sample-interval SAMPLE_INTERVAL] [--sample-count SAMPLE_COUNT] [--debug] [--skip-copy] [--skip-testpmd] [--duration DURATION] --profile
+                                           <profile>
+
+options:
+  -h, --help            show this help message and exit
+  --txd TXD             🚀 TX (Transmit) descriptor count
+  --rxd RXD             📡 RX (Receive) descriptor count
+  --warmup-duration WARMUP_DURATION
+                        🧪 Warmup duration in seconds to trigger MAC learning (default: 2)
+  --rx-socket-mem RX_SOCKET_MEM
+                        📦 Socket memory for RX side testpmd (default: 2048)
+  --tx-socket-mem TX_SOCKET_MEM
+                        📦 Socket memory for TX side pktgen (default: 2048)
+  --tx_num_core TX_NUM_CORE
+                        🚀 Number of cores to use for generation. If not set, uses all available cores minus one for main.
+  --rx_num_core RX_NUM_CORE
+                        🧠 Number of cores to use at receiver side. If not set, uses all available cores minus one for main.
+  --interactive INTERACTIVE
+                        run pktgen interactively.
+  --control-port CONTROL_PORT
+                        🔌 Pktgen control port used for socat communication (default: 22022)
+  --sample-interval SAMPLE_INTERVAL
+                        📈 Interval (in seconds) between pktgen stat samples (default: 10s)
+  --sample-count SAMPLE_COUNT
+                        🔁 Number of samples to collect. If not set, will use duration/sample-interval
+  --debug               🔍 Debug: Load and display contents of .npz results after test
+  --skip-copy           ⏭️ Skip copying Lua profiles and Pktgen.lua into TX pods
+  --skip-testpmd        ⏭️ Skip launching testpmd in RX pods
+  --duration DURATION   ⏱ Duration in seconds to run pktgen before stopping testpmd
+  --profile <profile>   📁 Available profiles: 🔹 collect.lua 🔹 profile_10000_flows_pkt_size_128B_100_rate_s.lua 🔹 profile_10000_flows_pkt_size_128B_10_rate_s.lua 🔹
+                        profile_10000_flows_pkt_size_1500B_100_rate_s.lua 🔹 profile_10000_flows_pkt_size_1500B_10_rate_s.lua 🔹 profile_10000_flows_pkt_size_2000B_100_rate_s.lua 🔹
+                        profile_10000_flows_pkt_size_2000B_10_rate_s.lua 🔹 profile_10000_flows_pkt_size_512B_100_rate_s.lua 🔹 profile_10000_flows_pkt_size_512B_10_rate_s.lua 🔹
+                        profile_10000_flows_pkt_size_64B_100_rate_s.lua 🔹 profile_10000_flows_pkt_size_64B_10_rate_s.lua 🔹 profile_10000_flows_pkt_size_9000B_100_rate_s.lua 🔹
+                        profile_10000_flows_pkt_size_9000B_10_rate_s.lua 🔹 profile_100_flows_pkt_size_128B_100_rate_s.lua 🔹 profile_100_flows_pkt_size_128B_10_rate_s.lua 🔹
+                        profile_100_flows_pkt_size_1500B_100_rate_s.lua 🔹 profile_100_flows_pkt_size_1500B_10_rate_s.lua 🔹 profile_100_flows_pkt_size_2000B_100_rate_s.lua 🔹
+                        profile_100_flows_pkt_size_2000B_10_rate_s.lua 🔹 profile_100_flows_pkt_size_512B_100_rate_s.lua 🔹 profile_100_flows_pkt_size_512B_10_rate_s.lua 🔹
+                        profile_100_flows_pkt_size_64B_100_rate_s.lua 🔹 profile_100_flows_pkt_size_64B_10_rate_s.lua 🔹 profile_100_flows_pkt_size_9000B_100_rate_s.lua 🔹
+                        profile_100_flows_pkt_size_9000B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_128B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_128B_10_rate_s.lua 🔹
+                        profile_1_flows_pkt_size_1500B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_1500B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_2000B_100_rate_s.lua 🔹
+                        profile_1_flows_pkt_size_2000B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_512B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_512B_10_rate_s.lua 🔹
+                        profile_1_flows_pkt_size_64B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_64B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_9000B_100_rate_s.lua 🔹
 ```
  
 ## Topologies
