@@ -461,6 +461,19 @@ python packet_generator.py generate_flow --rate 10,50,100 --pkt-size 64,512,1500
  
 ## Topologies
 
+The system supports different topologies, with traffic always being unidirectional. For instance, you can create a 
+single pair of pods on the same worker node or deploy multiple pod pairs on the same node. Alternatively, you 
+can configure a topology where all TX pods are deployed on separate worker nodes.
+
+In each case, multiple cores can be allocated per pod.  For example, you can test a single TX-RX pair with a 
+single core or allocate multiple cores for both TX and RX. Similarly, you can create N TX pods, each with two 
+or more cores, and do the same for RX pods.  Please note that the minimum configuration for a pod requires at 
+least 2 cores, with one core designated as the master core.
+
+EAL Flags, master core
+[DPDK EAL Parameters Documentation](https://doc.dpdk.org/guides-19.02/linux_gsg/linux_eal_parameters.html)
+
+```text
 +-------------------+                +-------------------+
 |      Worker 1     |                |      Worker 1     |
 |                   |                |                   |
@@ -509,3 +522,5 @@ python packet_generator.py generate_flow --rate 10,50,100 --pkt-size 64,512,1500
 |  |  (txN)      |  |       | Switch |  |  |  (rxN)   |  |
 |  +-------------+  |                |  +-------------+  |
 +-------------------+                +-------------------+
+```
+
