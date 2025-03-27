@@ -144,14 +144,14 @@ aligns with the node's available resources during traffic generation for optimal
 
 During Pod Creation:
 
-When the create_pod_pairs.sh script is run, the socket memory for both TX and RX pods 
-is dynamically configured based on the provided values.
+- **create_pod_pairs.sh**
+When the **create_pod_pairs.sh** script is run, the socket memory for both TX and RX pods 
+is dynamically configured based on the provided values.  The script generates the Pod YAML file with the 
+specified memory values for each pod. If no value is specified for socket memory, it will default to 2048MB 
+for both TX and RX pods.
 
-The script generates the Pod YAML file with the specified memory values for each pod.
-If no value is specified for socket memory, it will default to 2048MB for both TX and RX pods.
 
-In the Packet Generator (packet_generator.py):
-
+- **In the Packet Generator (packet_generator.py)**
 The start_generator command uses the --tx-socket-mem and --rx-socket-mem flags to pass the memory configuration to the running pods.
 When the test starts, the TX and RX pods will use the configured memory settings, ensuring they have enough resources to handle high-performance packet processing.
 
