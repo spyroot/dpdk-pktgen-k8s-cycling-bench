@@ -7,7 +7,6 @@
 DURATION=120
 
 profiles=(
-    "collect.lua"
     "profile_10000_flows_pkt_size_128B_100_rate_s.lua"
     "profile_10000_flows_pkt_size_128B_10_rate_s.lua"
     "profile_10000_flows_pkt_size_1500B_100_rate_s.lua"

@@ -1368,6 +1368,8 @@ def main_start_generator(
     expid = hashlib.md5(f"{cmd.profile}_{timestamp}".encode()).hexdigest()[:8]
     base_output_dir = os.path.join("results", f"{expid}")
 
+    print(f"📁 Results will be saved in: {base_output_dir}")
+
     if not cmd.skip_copy:
         copy_flows_to_pods(tx_pods, rx_pods)
     else:
@@ -1400,6 +1402,8 @@ def main_start_generator(
         rx_main, rx_cores, rx_all = rx_core_list[i]
 
         pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", args.profile.split(".")[0])
+        print(f"📁 Results will be saved in: {pair_dir}")
+
         os.makedirs(pair_dir, exist_ok=True)
 
         collect_and_parse_tx_stats(
