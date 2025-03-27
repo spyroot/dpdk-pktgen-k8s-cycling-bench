@@ -3,7 +3,14 @@
 This script is designed to automate the process of generating and running packet generation and 
 reception tests in a Kubernetes environment using DPDK (Data Plane Development Kit). 
 
-The script enables the creation of Lua flow profiles for Pktgen, manages packet generation traffic, 
+The system supports multiple configurations. As described in the Topology section, it allows you to run either a single 
+or multiple pairs of TX and RX pods, either on the same node or spread across different nodes.
+
+Additionally, the system enables the allocation of a subset of cores for the tests.
+Please note that the minimum configuration per TX or RX pod is 2 cores. DPDK requires at least one core 
+to be allocated as the master core for proper operation.
+
+The system enables the creation of Lua flow profiles for Pktgen, manages packet generation traffic, 
 collects performance statistics, and saves the results for further analysis.
 
 Key Features:
@@ -14,12 +21,85 @@ Key Features:
 - Stats Collection: Gathers detailed performance statistics like packet rate, byte count, and errors.
 - Results Logging: Logs the collected statistics into .npz files for post-test analysis, and optionally uploads the results to Weights & Biases (W&B) for visualization.
 
+## Prerequisites
+
+Before setting up and running the packet generation and reception tests, ensure the following prerequisites are met:
+
+## Kubernetes Cluster
+A working Kubernetes cluster is set up with admin access.  The cluster should have DPDK and SR-IOV (or Multus) c
+onfigured to support the required network devices.
+
+## DPDK Device Plugin:
+
+Ensure that the DPDK device plugin is installed in the cluster to manage DPDK resources.
+
+## Network Interface:
+
+The nodes in your cluster must have network interfaces that support DPDK (Data Plane Development Kit).
+Multus CNI (if deploying across multiple nodes):
+
+If deploying pods on different nodes or using multiple network interfaces, ensure Multus CNI is 
+installed for handling multi-network environments.
+
+## Kubeconfig:
+
+Make sure that kubectl is configured correctly to interact with your Kubernetes cluster. 
+The kubeconfig file should be available at ~/.kube/config.
+
+## Admin Access:
+
+Ensure you have admin privileges on the Kubernetes cluster to create and manage resources.
+
+## Hugepages and VFIO on Worker Node
+
+The Hugepages and VFIO (Virtual Function I/O) must be enabled on the worker nodes where the 
+DPDK workloads will run. 
+
+ To check if Hugepages and VFIO are enabled:
+
+ * The system should have hugepages enabled, with at least 2Gi of 1Gi Hugepages available.
+ * You can verify this by checking the available Hugepages with the following command:
+
+```bash
+cat /proc/meminfo | grep HugePages
+```
+
+Ensure that the VFIO driver is loaded and that the network interfaces intended for DPDK are bound to VFIO. 
+To check if VFIO is enabled, run:
+
+```bash
+lsmod | grep vfio
+```
+
+Make sure IOMMU enabled ( note this VM case IOMMU 0
+
+```bash
+dmesg | grep IOMMU
+[    0.194602] DMAR: IOMMU enabled
+[    0.365629] DMAR-IR: IOAPIC id 22 under DRHD base  0xfec10000 IOMMU 0
+[    0.554670] DMAR: IOMMU batching disallowed due to virtualization
+```
+
+Ensure  hugepages mounted.
+
+```bash
+mount | grep hugetlbfs
+hugetlbfs on /dev/hugepages type hugetlbfs (rw,relatime,pagesize=1024M)
+```
+
+Ensure  hugepages enable in kernel and correct page size set.
+
+```bash
+cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.1.90-1.ph5-rt root=PARTUUID=31cd07a8-a5bd-a255-9ea2-5cf4d847ee12  default_hugepagesz=1G hugepagesz=1G hugepages=16 intel_iommu=on iommu=pt intel_pstate=disable 
+```
+
 ## Installation Steps
 To set up and run the packet generation and reception tests in your environment, follow the steps below:
-
+```bash
 pip install numpy wandb argparse
 pip install matplotlib scipy numpy
-
+```
 
 ### Set Up Kubernetes Environment
 Ensure that kubectl is configured correctly to interact with your cluster. You can verify the configuration by running:
@@ -40,8 +120,8 @@ kubectl cluster-info
   dpdk-devbind --status
 ``` 
 
-
 ### Steps to Check if Static CPU Policy Manager is Enabled
+
 Kubernetes uses a cpu-manager-policy configuration to define how CPU resources are assigned to pods. 
 To check if the static CPU policy manager is enabled, run the following command on your Kubernetes node:
 
