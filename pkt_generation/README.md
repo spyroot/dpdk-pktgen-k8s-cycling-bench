@@ -87,7 +87,7 @@ mount | grep hugetlbfs
 hugetlbfs on /dev/hugepages type hugetlbfs (rw,relatime,pagesize=1024M)
 ```
 
-Ensure  hugepages enable in kernel and correct page size set.
+Ensure that Hugepages are enabled in the kernel and the correct page size (e.g., 1GB ) is configured."
 
 ```bash
 cat /proc/cmdline
