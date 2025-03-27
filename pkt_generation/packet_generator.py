@@ -98,25 +98,25 @@ Test results are saved to `/output/stats.log` in each RX pod for post-analysis.
 Autor mus
 
 """
-import subprocess
-import json
-import os
 import argparse
-from ipaddress import ip_address
-from subprocess import Popen
-from typing import List, Tuple, Dict
-import time
-from itertools import product
-import re
-import numpy as np
-from datetime import datetime
+import hashlib
+import json
 import logging
 import os
+import re
 import subprocess
 import tarfile
+import time
+from datetime import datetime
+from ipaddress import ip_address
+from itertools import product
+from subprocess import Popen
 from typing import List
+from typing import Tuple, Dict
+
+import numpy as np
+
 import wandb
-import hashlib
 
 logging.basicConfig(
     filename='pktgen.log',
@@ -133,34 +133,12 @@ require "Pktgen"
 
 local pauseTime		= 1000;
 
-local function collect_stats(a)
+local function setup_range_flow()
 
-    for i = 1, a.iterations, 1 do
-        pktgen.delay(a.sleeptime)
-        p = pktgen.portStats(0, 'port')[0]
-        r = pktgen.portStats(0, 'rate')[0]
+    pktgen.clear("all");
+    pktgen.cls();
+    pktgen.reset("all");
     
-        print(
-            'opkts:', p.opackets,
-            'ipkts:', p.ipackets,
-            'oerr:', p.oerrors,
-            'ierr:', p.ierrors,
-            'miss:', p.imissed,
-            'nobuf:', p.rx_nombuf,
-            'obytes:', p.obytes,
-            'ibytes:', p.ibytes,
-            'tx_pps:', r.pkts_tx,
-            'rx_pps:', r.pkts_rx,
-            'tx_mbps:', r.mbits_tx,
-            'rx_mbps:', r.mbits_rx
-        )
-        
-    end
-    
-    return 0
-end
-
-local function collect_stats(a)
     pktgen.stop(0);
     pktgen.set("all", "rate", {rate});
     pktgen.mac_from_arp("on");
@@ -174,24 +152,28 @@ local function collect_stats(a)
     
     pktgen.range.dst_mac("0", "start", "{dst_mac}")
     pktgen.range.src_mac("0", "start", "{src_mac}")
-    
+    pktgen.delay(1000);
+
     pktgen.range.dst_ip("0", "start", "{dst_ip}")
     pktgen.range.dst_ip("0", "inc", "{dst_ip_inc}")
     pktgen.range.dst_ip("0", "min", "{dst_ip}")
     pktgen.range.dst_ip("0", "max", "{dst_max_ip}")
-    
+    pktgen.delay(1000);
+
     pktgen.range.src_ip("0", "start", "{src_ip}")
     pktgen.range.src_ip("0", "inc", "{src_ip_inc}")
     pktgen.range.src_ip("0", "min", "{src_ip}")
     pktgen.range.src_ip("0", "max", "{src_max_ip}")
     
     pktgen.set_proto("0", "udp")
+    pktgen.delay(1000);
     
     pktgen.range.dst_port("0", "start", {dst_port})
     pktgen.range.dst_port("0", "inc", {dst_port_inc})
     pktgen.range.dst_port("0", "min", {dst_port})
     pktgen.range.dst_port("0", "max", {dst_port_max})
-    
+    pktgen.delay(1000);
+
     pktgen.range.src_port("0", "start", {src_port})
     pktgen.range.src_port("0", "inc", {src_port_inc})
     pktgen.range.src_port("0", "min", {src_port})
@@ -202,47 +184,21 @@ local function collect_stats(a)
     pktgen.range.pkt_size("0", "min", {pkt_size})
     pktgen.range.pkt_size("0", "max", {pkt_size})
     
-    pktgen.set_range("0", "on")
-    pktgen.delay(pauseTime)
-    
-    pktgen.page("rate")
-    pktgen.start(0)
-    pktgen.sleep(1)
-    
-    min_latency = collect_stats{{
-        sleeptime=60000,
-        iterations=1
-    }}
-    
-     p = pktgen.portStats(0, 'port')[0];
-     r = pktgen.portStats(0, 'rate')[0];
-        
-            print(
-                'opkts:', p.opackets,
-                'ipkts:', p.ipackets,
-                'oerr:', p.oerrors,
-                'ierr:', p.ierrors,
-                'miss:', p.imissed,
-                'nobuf:', p.rx_nombuf,
-                'obytes:', p.obytes,
-                'ibytes:', p.ibytes,
-                'tx_pps:', r.pkts_tx,
-                'rx_pps:', r.pkts_rx,
-                'tx_mbps:', r.mbits_tx,
-                'rx_mbps:', r.mbits_rx
-            )
-            
-    pktgen.stop(0);
+    pktgen.set_range("0", "on");
+    pktgen.set("0", "count", 0);
+    pktgen.page("stats");
+    pktgen.delay(1000);
+
+end
+
+local function start()
+    pktgen.start(0);
+    print("####### test started  #######")
 end
 
 function main()
-	file = io.open("RFC2544_throughput_results.txt", "w");
-	setupTraffic();
-	for _,size in pairs(pkt_sizes)
-	do
-		runThroughputTest(size);
-	end
-	file:close();
+	setup_range_flow();
+	start();
 end
 
 main();
@@ -770,6 +726,7 @@ def warmup_mac_learning(
         socket_mem: str
 ) -> None:
     """Warmup RX side to facilitate mac learning prior a run.
+
     :param pod: RX pode.
     :param tx_mac:  RX mac address.  This mac address is a destination mac from RX view point.
     :param cores_str:  RX cores number.
@@ -783,9 +740,8 @@ def warmup_mac_learning(
         f"timeout {warmup_duration}s dpdk-testpmd -l {cores_str} -n 4 --socket-mem {socket_mem} "
         f"--proc-type auto --file-prefix warmup_{pod} "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
-        f"-- --forward-mode=txonly --eth-peer=0,{tx_mac} --auto-start --stats-period 1 > /output/warmup.log 2>&1 &"
+        f"-- --forward-mode=txonly --eth-peer=0,{tx_mac} --auto-start --stats-period 1 > /output/warmup.log 2>&1"
     )
-
     kubectl_cmd = f"kubectl exec {pod} -- sh -c '{warmup_cmd}'"
     subprocess.run(kubectl_cmd, shell=True)
 
@@ -868,10 +824,15 @@ def start_dpdk_testpmd(
 
         # we give kernel/DPDK time to release resources after warmup
         time.sleep(1)
+        # duration = max(int(cmd.duration) - 2, 5)
 
-        duration = max(int(cmd.duration) - 2, 5)
+        expected_samples = cmd.duration // cmd.sample_interval
+        buffer_per_sample = 2
+        total_buffer = expected_samples * buffer_per_sample
+        timeout_duration = cmd.duration + total_buffer + 60
+
         testpmd_cmd = (
-            f"timeout {duration + 10} dpdk-testpmd --main-lcore {main_core} -l {all_core_str} -n 4 --socket-mem 2048 "
+            f"timeout {timeout_duration} dpdk-testpmd --main-lcore {main_core} -l {all_core_str} -n 4 --socket-mem 2048 "
             f"--proc-type auto --file-prefix testpmd_rx "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
             f"-- --forward-mode=rxonly --auto-start --stats-period 1 > /output/stats.log 2>&1 &"
@@ -947,8 +908,18 @@ def sample_pktgen_stats_via_socat(
         "sh", "-c", socat_cmd
     ]
 
-    subprocess.run(kubectl_cmd)
+    result = subprocess.run(kubectl_cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        stderr = result.stderr.lower()
+        if "connection refused" in stderr:
+            print(f"❌ [ERROR] Sampling failed on {pod}: connection refused.")
+        else:
+            print(f"❌ [ERROR] Sampling failed on {pod}: {result.stderr.strip()}")
+        return False
+
     print(f"[🧪] Extended stats sample complete for pod {pod}.")
+    return True
 
 
 def read_pktgen_stats(
@@ -1009,8 +980,14 @@ def launch_pktgen(
     :return:
     """
     lua_script_path = f"/{cmd.profile}"
+
+    expected_samples = cmd.duration // cmd.sample_interval
+    buffer_per_sample = 2
+    total_buffer = expected_samples * buffer_per_sample
+    timeout_duration = cmd.duration + total_buffer + 24
+
     pktgen_cmd = (
-        f"cd /usr/local/bin; timeout {cmd.duration + 5} pktgen --no-telemetry -l "
+        f"cd /usr/local/bin; timeout {timeout_duration} pktgen --no-telemetry -l "
         f"{all_cores} -n 4 --socket-mem {cmd.tx_socket_mem} --main-lcore {main_core} "
         f"--proc-type auto --file-prefix pg "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
@@ -1091,16 +1068,23 @@ def start_pktgen_on_tx_pods(
         sample_interval = cmd.sample_interval
         sample_count = cmd.sample_count or int(cmd.duration / sample_interval)
 
-        for _ in range(sample_count):
+        for i in range(sample_count):
             time.sleep(sample_interval)
-            sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
+            success = sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
+            if not success:
+                print(f"⚠️ Sampling failed at iteration {i}, pktgen may have terminated.")
+                break
 
+        # collect last sample
+        sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
         send_pktgen_stop(pod, cmd.control_port)
+        sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
+
         exit_code = process.wait()
-        if exit_code != 0:
-            print(f"❌ [ERROR] pktgen process in pod {pod} exited with code {exit_code}")
-        else:
+        if exit_code == 0 or exit_code == 124:
             print(f"✅ pktgen in pod {pod} completed successfully.")
+        else:
+            print(f"❌ [ERROR] pktgen in pod {pod} exited with code {exit_code}")
 
         if cmd.debug:
             read_pktgen_stats(pod)
@@ -1142,7 +1126,7 @@ def build_stats_filename(
     """
     base_name = profile_name.replace(".lua", "")
     expid_prefix = f"{expid}_" if expid else ""
-    return f"{expid_prefix}{pod_name}_{role}_stats_tx_cores_{tx_cores}_rx_cores_{rx_cores}_{suffix}_{base_name}_{timestamp}.{extension}"
+    return f"{expid_prefix}{pod_name}_{role}_txcores_{tx_cores}_rxcores_{rx_cores}_{suffix}_{base_name}_{timestamp}.{extension}"
 
 
 def collect_and_parse_rx_stats(
@@ -1398,7 +1382,7 @@ def main_start_generator(
     move_pktgen_profiles(tx_pods)
     tx_core_list = start_pktgen_on_tx_pods(tx_pods, tx_numa, cmd)
     # we sleep a bit, to let all pkt receive.
-    time.sleep(10)
+    time.sleep(60)
     stop_testpmd_on_rx_pods(rx_pods)
 
     print("✅ Test run complete. Collecting stats...")
@@ -1723,7 +1707,7 @@ if __name__ == '__main__':
     start.add_argument("--rxd", type=int, default=2048, help="📡 RX (Receive) descriptor count")
 
     start.add_argument(
-        "--warmup-duration", type=int, default=2,
+        "--warmup-duration", type=int, default=4,
         help="🧪 Warmup duration in seconds to trigger MAC learning (default: 2)"
     )
 
@@ -1744,10 +1728,8 @@ if __name__ == '__main__':
     start.add_argument("--rx_num_core", type=int, default=None,
                        help="🧠 Number of cores to use at receiver side. "
                             "If not set, uses all available cores minus one for main.")
-
     start.add_argument("--interactive", type=bool, default=False,
                        help="run pktgen interactively.")
-
     start.add_argument("--control-port", type=str, default="22022",
                        help="🔌 Pktgen control port used for socat communication (default: 22022)")
     start.add_argument("--sample-interval", type=int, default=10,
