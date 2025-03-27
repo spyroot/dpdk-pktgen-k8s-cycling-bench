@@ -1399,7 +1399,7 @@ def main_start_generator(
         tx_main, tx_cores, tx_all = tx_core_list[i]
         rx_main, rx_cores, rx_all = rx_core_list[i]
 
-        pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", cmd.cmd.profile.split(".")[0])
+        pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", args.profile.split(".")[0])
         os.makedirs(pair_dir, exist_ok=True)
 
         collect_and_parse_tx_stats(

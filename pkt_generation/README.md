@@ -443,21 +443,23 @@ Events:                      <none>
 ```
 
 
-Deploy the Profile: After creating the pods, you can deploy the test profile using the command:
-
-bash
-Copy
-python packet_generator.py start_generator --profile <profile_name> --duration <test_duration>
 
 Replace <profile_name> with the appropriate Lua profile, and <test_duration> with the desired duration for the test in seconds.
 
-### Running the Script
+## Running the Script
 
 Once all dependencies are installed and the environment is set up,
 you can run the script using the following commands:
 
+```bash
 python packet_generator.py generate_flow --rate 10,50,100 --pkt-size 64,512,1500 --flows 1,10000
+```
 
+In order to start generated profile
+
+```bash
+python packet_generator.py start_generator --profile <profile_name> --duration <test_duration>
+```
  
 ## Topologies
 
