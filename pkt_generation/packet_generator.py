@@ -1296,7 +1296,6 @@ def debug_dump_npz_results(
     :return:
     """
     from glob import glob
-
     print("\n🧪 DEBUG: Dumping parsed .npz result files:")
     for npz_file in sorted(glob(os.path.join(result_dir, "*.npz"))):
         print(f"\n📂 {npz_file}")
@@ -1367,6 +1366,7 @@ def main_start_generator(
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     expid = hashlib.md5(f"{cmd.profile}_{timestamp}".encode()).hexdigest()[:8]
+    base_output_dir = os.path.join("results", f"{expid}")
 
     if not cmd.skip_copy:
         copy_flows_to_pods(tx_pods, rx_pods)
@@ -1395,8 +1395,12 @@ def main_start_generator(
         print(f"⚠️  Warning: Only {len(rx_core_list)} RX pods successfully launched testpmd out of {len(rx_pods)}")
 
     for i, (tx_pod, rx_pod) in enumerate(zip(tx_pods, rx_pods)):
+
         tx_main, tx_cores, tx_all = tx_core_list[i]
         rx_main, rx_cores, rx_all = rx_core_list[i]
+
+        pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", cmd.cmd.profile.split(".")[0])
+        os.makedirs(pair_dir, exist_ok=True)
 
         collect_and_parse_tx_stats(
             [tx_pod],
@@ -1405,7 +1409,7 @@ def main_start_generator(
             timestamp=timestamp,
             expid=expid,
             profile_name=cmd.profile,
-            output_dir="results"
+            output_dir=pair_dir
         )
 
         collect_and_parse_rx_stats(
@@ -1415,11 +1419,11 @@ def main_start_generator(
             timestamp=timestamp,
             expid=expid,
             profile_name=cmd.profile,
-            output_dir="results"
+            output_dir=pair_dir
         )
 
-    if cmd.debug:
-        debug_dump_npz_results("results")
+        if cmd.debug:
+            debug_dump_npz_results(pair_dir)
 
     print("📁 All results saved in 'results/' directory.")
 
@@ -1800,3 +1804,5 @@ if __name__ == '__main__':
         main_start_generator(args)
     elif args.command == "upload_wandb":
         upload_npz_to_wandb(result_dir=args.result_dir, expid=args.expid)
+
+
