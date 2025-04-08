@@ -637,3 +637,141 @@ EAL Flags, master core
 +-------------------+                +-------------------+
 ```
 
+### Appendix.
+
+Default pod template , note persistent storage optional.   As part of k8s there separate provisioner I use.
+Check sub-dir provisioner for details.
+
+```yaml
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: output-pvc-{{pod-name}}
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{storage-size}}Gi
+  storageClassName: {{storage-class}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{pod-name}}
+  labels:
+    environment: dpdk.tester
+    app: mus.toolkit
+  annotations:
+    pod-type: "{{pod-role}}"
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - {{node-name}}
+  containers:
+    - name: {{pod-name}}
+      command: ["/bin/bash", "-c", "PID=; trap 'kill $PID' TERM INT; sleep infinity & PID=$!; wait $PID"]
+      image: {{image}}
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        capabilities:
+          add:
+            - IPC_LOCK
+            - CAP_SYS_NICE
+            - SYS_NICE
+            - NET_ADMIN
+            - SYS_TIME
+            - CAP_NET_RAW
+            - CAP_BPF
+            - CAP_SYS_ADMIN
+            - SYS_ADMIN
+        privileged: true
+      env:
+        - name: SRC_MAC
+          value: "{{src-mac}}"
+        - name: DST_MAC
+          value: "{{dst-mac}}"
+        - name: SRC_PCI
+          value: "{{src-pci}}"
+        - name: DST_PCI
+          value: "{{dst-pci}}"
+        - name: PATH
+          value: "/bin:/sbin:/usr/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:$PATH"
+      volumeMounts:
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: output
+          mountPath: "/output"
+        - name: kubeconfig
+          mountPath: {{kubeconfig-path}}
+        - name: hugepage
+          mountPath: /dev/hugepages
+      resources:
+        requests:
+          cpu: "{{cpu-request}}"
+          memory: "{{memory-request}}Gi"
+          {{resource-requests}}
+        limits:
+          cpu: "{{cpu-limit}}"
+          memory: "{{memory-limit}}Gi"
+          hugepages-1Gi: "{{hugepages-limit}}Gi"
+          {{resource-limits}}
+  volumes:
+    - name: sys
+      hostPath:
+        path: /sys
+    - name: modules
+      hostPath:
+        path: /lib/modules
+    - name: output
+      persistentVolumeClaim:
+        claimName: output-pvc-{{pod-name}}
+    - name: hugepage
+      hostPath:
+          path: /dev/hugepages
+    - name: kubeconfig
+      hostPath:
+        path: {{kubeconfig-path}}
+  nodeSelector:
+    kubernetes.io/os: linux
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sonobuoy-rolebinding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: Role
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sonobuoy-clusterrolebinding
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+
+```
