@@ -16,7 +16,7 @@ so on...
 And alternative configuration where we have two node and each node host N pod , it could since pair
 TX0 - RX0 where TX0 on Node Alice and RX on Node BOB
 or N pods
-where TX0,TX1 .. son on
+where TX0,TX1 . son on
 
 
 The simplest test setup involves two pods scheduled on the same Kubernetes worker node:
@@ -103,6 +103,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import sys
 import re
 import subprocess
 import tarfile
@@ -110,22 +112,20 @@ import time
 from datetime import datetime
 from ipaddress import ip_address
 from itertools import product
-from subprocess import Popen
-from typing import List
+from typing import List, Optional, Union
 from typing import Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-
 import wandb
 
-logging.basicConfig(
-    filename='pktgen.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# logging.basicConfig(
+#     filename='pktgen.log',
+#     level=logging.INFO,
+#     format='%(asctime)s - %(levelname)s - %(message)s'
+# )
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 # this out template
 LUA_UDP_TEMPLATE = """\
@@ -209,7 +209,7 @@ main();
 # modification required.
 # A) in pod template we attac h 2 port vs 1
 # B) in cmd we need accept type of test
-# C) we need resolve both PCI addr and pass ( i.e same semantic as per pair unidirectional )
+# C) we need resolve both PCI addr and pass ( i.e. same semantic as per pair unidirectional )
 # D) we switch to this template
 # E) We add type of test loop convergence.
 #
@@ -315,7 +315,6 @@ main();
 
 def parse_testpmd_log(log_lines):
     """
-
     :param log_lines:
     :return:
     """
@@ -400,6 +399,11 @@ def parse_testpmd_log(log_lines):
     }
 
 
+def safe_print(*_args, sep=" ", end="\n", **kwargs):
+    joined_string = sep.join([str(arg) for arg in _args])
+    print(joined_string + end, sep=sep, end="", **kwargs)
+
+
 def get_increments_from_mode(
         mode: str, num_flows: int
 ):
@@ -409,8 +413,6 @@ def get_increments_from_mode(
     :return:
     """
     ip_inc = "0.0.0.1" if 's' in mode or 'd' in mode else "0.0.0.0"
-    port_inc = 1 if 'p' in mode else 0
-
     increments = {
         "src_ip_inc": ip_inc if 's' in mode else "0.0.0.0",
         "dst_ip_inc": ip_inc if 'd' in mode else "0.0.0.0",
@@ -422,13 +424,21 @@ def get_increments_from_mode(
 
 def get_pods(
 ) -> Tuple[List[str], List[str]]:
-    """Fetch all pods and return txN and rxN separately.
+    """
+    Fetch all pods and return txN and rxN separately.
     Tuple is pair txN t rxN,  where txN is a list of pod names.
-    :return:
+    :return: Tuple[List[str], List[str]]: tx_pods and rx_pods
+    :raise RuntimeError: if kubectl fails or no tx/rx pods are found
     """
     cmd = "kubectl get pods -o json"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    pod_data = json.loads(result.stdout)
+    if result.returncode != 0:
+        raise RuntimeError(f"❌ Failed to get pods: {result.stderr.strip()}")
+
+    try:
+        pod_data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError("❌ Failed to parse pod data from kubectl output.")
 
     tx_pods = []
     rx_pods = []
@@ -440,8 +450,14 @@ def get_pods(
         elif pod_name.startswith("rx"):
             rx_pods.append(pod_name)
 
+    if not tx_pods:
+        raise RuntimeError("❌ No TX pods found (expected pod names like 'tx0', 'tx1', ...)")
+    if not rx_pods:
+        raise RuntimeError("❌ No RX pods found (expected pod names like 'rx0', 'rx1', ...)")
+
     tx_pods.sort()
     rx_pods.sort()
+
     return tx_pods, rx_pods
 
 
@@ -450,7 +466,7 @@ def get_mac_address(
 ) -> str:
     """Extract MAC address from dpdk-testpmd inside a pod with env var.
 
-    Note we always mask EAL via -a hence TX or RX pod see a single DPKD port.
+    Note we always mask EAL via -a hence TX or RX pod see a single DPDK port.
     All profile use VF's mac address that eliminates -P (promiscuous mode)
 
     :param pod_name: tx0, tx1, rx0 etc. pod name
@@ -467,21 +483,20 @@ def get_mac_address(
     result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
     full_output = result.stdout + result.stderr
     match = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", full_output)
-
     return match.group(0) if match else None
 
 
 def get_numa_cores(
         pod_name: str
-) -> str:
+) -> Union[str, None]:
     """Extract NUMA core bindings from numactl -s
 
     We figure out how many core to use on TX or RX side from a numa topology.
 
     i.e.
 
-    - if pod create 2 CPU , it single core test , we always need 1 core fas master core.
-    (read dpdk doc)
+    - if pod created with a 2 CPU , it singles core test, thus,
+    we always need 1 core fas master core. (read dpdk doc)
 
     - if pod crate with 5 core  one for master 2 TX 2 for RX
 
@@ -521,6 +536,9 @@ def collect_pods_related(
     def collect_info(pod: str):
         """thread callback"""
         mac_ = get_mac_address(pod).strip() if collect_macs else ""
+        _n = get_numa_cores(pod)
+        if _n is None:
+            raise RuntimeError("failed acquire numa information.")
         numa_ = get_numa_cores(pod).strip()
         node_ = pod_to_node.get(pod, "unknown")
         return pod, mac_, numa_, node_
@@ -554,13 +572,13 @@ def collect_pods_related(
         rx_nodes.append(info["node"])
 
     if collect_macs:
-        print("\n🧾 TX Pods MAC Addresses & NUMA Cores:")
+        logger.info("\n🧾 TX Pods MAC Addresses & NUMA Cores:")
         for i, pod in enumerate(tx_pods):
-            print(f"{pod}: MAC={tx_macs[i]}, NUMA={tx_numa[i]}")
+            logger.info(f"{pod}: MAC={tx_macs[i]}, NUMA={tx_numa[i]}")
 
-        print("\n🧾 RX Pods MAC Addresses & NUMA Cores:")
+        logger.info("\n🧾 RX Pods MAC Addresses & NUMA Cores:")
         for i, pod in enumerate(rx_pods):
-            print(f"{pod}: MAC={rx_macs[i]}, NUMA={rx_numa[i]}")
+            logger.info(f"{pod}: MAC={rx_macs[i]}, NUMA={rx_numa[i]}")
 
     return tx_macs, rx_macs, tx_numa, rx_numa, tx_nodes, rx_nodes
 
@@ -654,16 +672,18 @@ def parse_pktgen_port_stats_csv(
     return {k: np.array(v) for k, v in metrics.items()}, metadata
 
 
-def copy_flows_to_pod_pair(tx: str, rx: str) -> None:
-    """
-
+def copy_flows_to_pod_pair(
+        tx: str,
+        rx: str
+) -> None:
+    """ Copy
     :param tx:
     :param rx:
     :return:
     """
     flow_dir = f"flows/{tx}-{rx}"
     if not os.path.exists(flow_dir):
-        print(f"⚠️ Warning: Flow directory {flow_dir} does not exist.")
+        logger.info(f"⚠️ Warning: Flow directory {flow_dir} does not exist.")
         return
 
     tar_path = f"/tmp/{tx}-{rx}.tar"
@@ -673,25 +693,44 @@ def copy_flows_to_pod_pair(tx: str, rx: str) -> None:
                 full_path = os.path.join(flow_dir, file)
                 tar.add(full_path, arcname=file)
 
-    print(f"📦 Copying {tar_path} to pod {tx}")
+        tar.add("sample.lua", arcname="sample_pktgen.lua")
+
+    logger.info(f"📦 Copying {tar_path} to pod {tx}")
     subprocess.run(f"kubectl cp {tar_path} {tx}:/tmp/", shell=True, check=True)
 
-    print(f"📂 Extracting files inside {tx}")
-    subprocess.run(
-        f"kubectl exec {tx} -- tar -xf /tmp/{tx}-{rx}.tar -C / 2>/dev/null",
-        shell=True,
-        check=True
-    )
+    logger.info(f"📂 Extracting files inside {tx}")
+    try:
+        result = subprocess.run(
+            f"kubectl exec {tx} -- sh -c 'tar -xf /tmp/{tx}-{rx}.tar -C / > /dev/null 2>&1'",
+            shell=True,
+            check=True
+        )
+        logger.info(f"✅ Extraction completed in pod {tx} (exit code: {result.returncode})")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Failed to extract tar in pod {tx}: {e}")
 
     os.remove(tar_path)
 
 
 def copy_flows_to_pods(tx_pods: List[str], rx_pods: List[str]) -> None:
     """Copy all .lua files from flow directories to corresponding TX pods in one go
-    :param tx_pods:
-    :param rx_pods:
+
+    :param tx_pods: a list of tx pods
+    :param rx_pods: a list of rx pods
     :return:
     """
+    if not tx_pods or not rx_pods:
+        raise ValueError("❌ TX or RX pods list is empty.")
+
+    if len(tx_pods) != len(rx_pods):
+        raise ValueError(
+            f"❌ TX and RX pod count mismatch: "
+            f"{len(tx_pods)} != {len(rx_pods)}")
+
+    for pod in tx_pods + rx_pods:
+        if pod is None or not isinstance(pod, str):
+            raise TypeError(f"❌ Invalid pod name: {pod}")
+
     with ThreadPoolExecutor(max_workers=len(tx_pods)) as pool:
         pool.map(lambda pair: copy_flows_to_pod_pair(*pair), zip(tx_pods, rx_pods))
 
@@ -753,7 +792,7 @@ def write_pair_metadata(
         for key, value in vars(cmd).items():
             f.write(f"{key}={value}\n")
 
-    print(f"📝 Metadata saved to {metadata_path}")
+    logger.info(f"📝 Metadata saved to {metadata_path}")
 
 
 def move_pktgen_profiles(
@@ -766,13 +805,13 @@ def move_pktgen_profiles(
     :return:
     """
     for tx in tx_pods:
-        print(f"📦 Copying Pktgen.lua")
+        logger.info(f"📦 Copying Pktgen.lua")
         cmd = f"kubectl exec {tx} -- cp /root/Pktgen-DPDK/Pktgen.lua /usr/local/bin/"
         result = subprocess.run(cmd, shell=True)
         if result.returncode == 0:
-            print(f"✅ [OK] {tx}: Copied successfully.")
+            logger.info(f"✅ [OK] {tx}: Copied successfully.")
         else:
-            print(f"❌ [ERROR] {tx}: Failed to copy.")
+            logger.info(f"❌ [ERROR] {tx}: Failed to copy.")
 
 
 def main_generate(
@@ -793,18 +832,18 @@ def main_generate(
 
     for rate in rates:
         if not (1 <= rate <= 100):
-            print(f"❌ Invalid rate: {rate}. Rate must be between 1 and 100 (inclusive).")
+            logger.info(f"❌ Invalid rate: {rate}. Rate must be between 1 and 100 (inclusive).")
             exit(1)
 
     for size in pkt_sizes:
         if not (64 <= size <= 9000):
-            print(f"❌ Invalid packet size: {size}. Must be between 64 and 9000.")
+            logger.info(f"❌ Invalid packet size: {size}. Must be between 64 and 9000.")
             exit(1)
 
     for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
         flow_dir = f"flows/{t}-{r}"
         os.makedirs(flow_dir, exist_ok=True)
-        print(f"📂 Generating flows in {flow_dir}")
+        logger.info(f"📂 Generating flows in {flow_dir}")
 
         for flow, rate, size in product(flow_counts, rates, pkt_sizes):
             render_paired_lua_profile(
@@ -838,7 +877,7 @@ def warmup_mac_learning(
     :param socket_mem:
     :return:
     """
-    print(f"📡 [Warmup] Sending from {pod} to {tx_mac} to trigger MAC learning")
+    logger.info(f"📡 [Warmup] Sending from {pod} to {tx_mac} to trigger MAC learning")
 
     warmup_cmd = (
         f"timeout {warmup_duration}s dpdk-testpmd -l {cores_str} -n 4 --socket-mem {socket_mem} "
@@ -847,7 +886,25 @@ def warmup_mac_learning(
         f"-- --forward-mode=txonly --eth-peer=0,{tx_mac} --auto-start --stats-period 1 > /output/warmup.log 2>&1"
     )
     kubectl_cmd = f"kubectl exec {pod} -- sh -c '{warmup_cmd}'"
-    subprocess.run(kubectl_cmd, shell=True)
+    result = subprocess.run(kubectl_cmd, capture_output=True, shell=True)
+    if result.returncode == 124:
+        logger.info(f"📡 [Warmup Done].")
+
+
+def timeout_handler(exit_code):
+    """
+    EXIT status:
+          124  if COMMAND times out, and --preserve-status is not specified
+          125  if the timeout command itself fails
+          126  if COMMAND is found but cannot be invoked
+          127  if COMMAND cannot be found
+          137  if COMMAND (or timeout itself) is sent the KILL (9) signal (128+9)
+
+  -    the exit status of COMMAND otherwise
+
+    :param exit_code:
+    :return:
+    """
 
 
 def start_dpdk_testpmd(
@@ -890,7 +947,7 @@ def start_dpdk_testpmd(
         available_cores = len(numa_cores)
 
         if available_cores < 2:
-            print(f"[⚠️ WARNING] Pod {pod} has only {available_cores} cores; expected at least 2.")
+            logger.info(f"[⚠️ WARNING] Pod {pod} has only {available_cores} cores; expected at least 2.")
             continue
 
         # numa_cores = rx_numa[index].strip().split()
@@ -944,7 +1001,7 @@ def start_dpdk_testpmd(
         )
 
         kubectl_cmd = f"kubectl exec {pod} -- sh -c '{testpmd_cmd}'"
-        print(f"🚀 [INFO] Starting testpmd on {pod} → main_core={main_core}, rx_cores={rx_cores}")
+        logger.info(f"🚀 [INFO] Starting testpmd on {pod} → main_core={main_core}, rx_cores={rx_cores}")
 
         subprocess.run(kubectl_cmd, shell=True)
         time.sleep(2)
@@ -963,13 +1020,56 @@ def start_dpdk_testpmd(
         ).stdout.strip() == "OK"
 
         if proc_running and log_ok:
-            print(f"[✅] {pod}: dpdk-testpmd is running and logging.")
+            logger.info(f"[✅] {pod}: dpdk-testpmd is running and logging.")
         else:
-            print(f"[❌] {pod}: dpdk-testpmd may have failed.")
+            logger.info(f"[❌] {pod}: dpdk-testpmd may have failed.")
 
         rx_core_list.append((main_core, rx_core_str, all_core_str))
 
     return rx_core_list
+
+
+def generate_sampling_lua_script(
+        filepath: str = "sample.lua",
+        pkt_file: str = '/tmp/pkt_stats.csv',
+        rate_file: str = '/tmp/port_rate_stats.csv',
+        port_file: str = '/tmp/port_stats.csv',
+):
+    """This function generate lua script that we use to sample stats.
+
+    :param filepath:  a path where save (locally before we copy to each pod)
+    :param pkt_file:  this is a pkt stats location insider a pod
+    :param rate_file: this is a pkt rate stats file location insider a pod
+    :param port_file: this is a port  stats file location insider a pod
+    :return:
+    """
+    lua_script = (
+        "local ts = os.date('!%Y-%m-%dT%H:%M:%S'); "
+
+        "local rate = pktgen.portStats(0, 'rate'); "
+        f"if rate and rate[0] then "
+        f"local f1 = io.open('{rate_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(rate[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f1:write(str:sub(1, -2), '\\n'); f1:close(); end; "
+
+        "local pkt = pktgen.pktStats(0)[0]; "
+        f"if pkt then "
+        f"local f2 = io.open('{pkt_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(pkt) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f2:write(str:sub(1, -2), '\\n'); f2:close(); end; "
+
+        "local port = pktgen.portStats(0, 'port'); "
+        f"if port and port[0] then "
+        f"local f3 = io.open('{port_file}', 'a'); "
+        "local str = ts .. ','; "
+        "for k,v in pairs(port[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+        "f3:write(str:sub(1, -2), '\\n'); f3:close(); end; "
+    )
+
+    with open("sample.lua", "w") as f:
+        f.write(lua_script)
 
 
 def sample_pktgen_stats_via_socat(
@@ -981,8 +1081,6 @@ def sample_pktgen_stats_via_socat(
         port: str = '22022'):
     """Sample stats from pktgen using socat as control channel
     and store them in a file."""
-
-    print(f"[🧪] Sampling stats from Pktgen on pod {pod}")
 
     lua_script = (
         "local ts = os.date('!%Y-%m-%dT%H:%M:%S'); "
@@ -1009,23 +1107,23 @@ def sample_pktgen_stats_via_socat(
         "f3:write(str:sub(1, -2), '\\n'); f3:close(); end; "
     )
 
-    socat_cmd = f"echo \"{lua_script}\" | socat - TCP4:localhost:{port}"
+    # socat_cmd = f"echo \"{lua_script}\" | socat - TCP4:localhost:{port}"
+    socat_cmd = f"cat /sample_pktgen.lua | socat - TCP4:localhost:{port}"
+
     kubectl_cmd = [
-        "kubectl", "exec", "-it", pod, "--",
+        "kubectl", "exec", pod, "--",
         "sh", "-c", socat_cmd
     ]
-
     result = subprocess.run(kubectl_cmd, capture_output=True, text=True)
-
     if result.returncode != 0:
         stderr = result.stderr.lower()
         if "connection refused" in stderr:
-            print(f"❌ [ERROR] Sampling failed on {pod}: connection refused.")
+            logger.error(f"❌ [ERROR] Sampling failed on {pod}: connection refused.")
         else:
-            print(f"❌ [ERROR] Sampling failed on {pod}: {result.stderr.strip()}")
+            logger.error(f"❌ [ERROR] Sampling failed on {pod}: {result.stderr.strip()}")
         return False
 
-    print(f"[🧪] Extended stats sample complete for pod {pod}.")
+    logger.info(f"[✅ {pod}] Updated stats sample complete for pod {pod}.")
     return True
 
 
@@ -1039,7 +1137,7 @@ def read_pktgen_stats(
     :return:
     """
     """Read the collected stats from the file and print them."""
-    print(f"[🧪] Reading stats from {file_name} on pod {pod}")
+    logger.info(f"[🧪] Reading stats from {file_name} on pod {pod}")
     # Read the stats file
     read_cmd = [
         "kubectl", "exec", "-it", pod, "--",
@@ -1047,10 +1145,10 @@ def read_pktgen_stats(
     ]
     result = subprocess.run(read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode == 0:
-        print(f"[🧪] Stats from pod {pod}:")
-        print(result.stdout.decode())
+        logger.info(f"[🧪] Stats from pod {pod}:")
+        logger.info(result.stdout.decode())
     else:
-        print(f"[ERROR] Failed to read stats from pod {pod}: {result.stderr.decode()}")
+        logger.info(f"[ERROR] Failed to read stats from pod {pod}: {result.stderr.decode()}")
 
 
 def validate_and_cleanup_lua(
@@ -1060,7 +1158,7 @@ def validate_and_cleanup_lua(
     lua_script_path = f"/{profile}"
     check_cmd = f"kubectl exec -it {pod} -- sh -c 'test -s {lua_script_path}'"
     if subprocess.run(check_cmd, shell=True).returncode != 0:
-        print(f"❌ [ERROR] Lua script {lua_script_path} missing or empty in {pod}")
+        logger.error(f"❌ [ERROR] Lua script {lua_script_path} missing or empty in {pod}")
         return False
 
     cleanup_cmd = f"kubectl exec {pod} -- sh -c 'rm -f /tmp/*.csv'"
@@ -1112,46 +1210,39 @@ def launch_pktgen(
         f"--proc-type auto --file-prefix pg "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
         f"-- -G --txd={cmd.txd} --rxd={cmd.rxd} "
-        f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0 2>/dev/null"
+        f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0"
     )
 
     kubectl_cmd = f"kubectl exec -it {pod} -- sh -c '{pktgen_cmd}'"
     window_name = pod
-    subprocess.run(["tmux", "send-keys", "-t", f"{session_name}:{window_name}", kubectl_cmd, "Enter"], check=True)
+    subprocess.run(
+        ["tmux", "send-keys", "-t", f"{session_name}:{window_name}", kubectl_cmd, "Enter"])
 
     # if getattr(cmd, "use_tmux", False):
     #     pktgen_cmd = f"tmux new-session -d -s pktgen '{base_pktgen_cmd}'"
     # else:
     #     pktgen_cmd = base_pktgen_cmd
 
-    logger.info(f"Pktgen command for {pod}: {pktgen_cmd}")
-    print(f"[🧪] Launching Pktgen on {pod} using profile: {cmd.profile}")
-
-    # if getattr(cmd, "tmux", False):
-    #     exec_cmd = ["tmux", "new-session", "-d", "-s", "pktgen", "kubectl", "exec"]
-    # else:
-    #     exec_cmd = ["kubectl", "exec"]
-    #
-    # if getattr(cmd, "interactive", False) and not getattr(cmd, "tmux", False):
-    #     exec_cmd.append("-it")
-    #
-    # exec_cmd += [pod, "--", "sh", "-c", base_pktgen_cmd]
-    # print("Running cmd")
-    # print(exec_cmd)
-
-    # process = subprocess.Popen(
-    #     exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    # return process
+    logger.debug(f"pktgen command for {pod}: {pktgen_cmd}")
+    logger.info(f"[✅] Launching Pktgen on {pod} using profile: {cmd.profile}")
 
 
-def kill_tmux_session(session_name: str):
+def kill_tmux_session(
+        session_name: str
+):
     """Kill a tmux session if it exists."""
     if tmux_session_exists(session_name):
-        print(f"[💀] Killing existing tmux session: {session_name}")
+        logger.info(f"[💀] Killing existing tmux session: {session_name}")
         subprocess.run(["tmux", "kill-session", "-t", session_name], check=True)
 
 
-def tmux_session_exists(session_name: str) -> bool:
+def tmux_session_exists(
+        session_name: str
+) -> bool:
+    """
+    :param session_name:
+    :return:
+    """
     result = subprocess.run(
         ["tmux", "has-session", "-t", session_name],
         stdout=subprocess.DEVNULL,
@@ -1160,7 +1251,18 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
-def ensure_tmux_window_ready(session: str, window: str, timeout: int = 3):
+def ensure_tmux_window_ready(
+        session: str,
+        window: str,
+        timeout: int = 3
+):
+    """
+
+    :param session:
+    :param window:
+    :param timeout:
+    :return:
+    """
     for _ in range(timeout * 10):
         result = subprocess.run(
             ["tmux", "list-windows", "-t", session],
@@ -1185,14 +1287,14 @@ def prepare_tmux_session(
     """
     kill_tmux_session(session_name)
 
-    print(f"[🧰] Creating tmux session: {session_name}")
+    logger.info(f"[🧰] Creating tmux session: {session_name}")
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", session_name, "-n", "bootstrap", "bash"],
         check=True
     )
 
     for win in window_names:
-        print(f"[🧰] Creating window: {win} in session: {session_name}")
+        logger.info(f"[🧰] Creating window: {win} in session: {session_name}")
         subprocess.run(["tmux", "new-window", "-t", session_name, "-n", win], check=True)
         ensure_tmux_window_ready(session_name, win)
 
@@ -1254,9 +1356,10 @@ def start_pktgen_on_tx_pods(
     prepare_tmux_session(session_name, tx_pods)
 
     def run_for_pod(
-            i: int, pod:
-            str, numa_str: str
-    ) -> Tuple[str, str, str]:
+            i: int,
+            pod: str,
+            numa_str: str
+    ) -> Union[Tuple[str, str, str], None]:
         """
         :param i: 
         :param pod: 
@@ -1266,7 +1369,7 @@ def start_pktgen_on_tx_pods(
         numa_cores = tx_numa[i].strip().split()
         # for single core test, we need 2 core one for --master to collect stats.
         if len(numa_cores) < 2:
-            print(f"[WARNING] Pod {pod} does not have enough NUMA cores.")
+            logger.info(f"[WARNING] Pod {pod} does not have enough NUMA cores.")
             return None
 
         # Single core test: If only two cores are available, use them for TX and RX
@@ -1274,7 +1377,6 @@ def start_pktgen_on_tx_pods(
         usable_cores = numa_cores[1:]
 
         if len(numa_cores) == 2:
-            all_core_list = ",".join(numa_cores)
             tx_cores = rx_cores = numa_cores[1]
         else:
             total_cores = len(numa_cores)
@@ -1296,21 +1398,22 @@ def start_pktgen_on_tx_pods(
         if not validate_and_cleanup_lua(pod, cmd.profile):
             return None
 
-
         try:
             launch_pktgen(pod, main_core, tx_cores, rx_cores, all_core_str, cmd, session_name)
         except Exception as e:
-            print(f"[❌] Failed to launch pktgen in {pod}: {e}")
+            logger.error(f"[❌] Failed to launch pktgen in {pod}: {e}")
             return None
 
         sample_interval = cmd.sample_interval
         sample_count = cmd.sample_count or int(cmd.duration / sample_interval)
 
+        logger.info(f"[{pod}] Sampling stats from pktgen")
+
         for j in range(sample_count):
             time.sleep(sample_interval)
             success = sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
             if not success:
-                print(f"⚠️ Sampling failed at iteration {j}, pktgen may have terminated.")
+                logger.info(f"⚠️ Sampling failed at iteration {j}, pktgen may have terminated.")
                 break
 
         # collect last sample
@@ -1318,40 +1421,28 @@ def start_pktgen_on_tx_pods(
         send_pktgen_stop(pod, cmd.control_port)
         sample_pktgen_stats_via_socat(pod, cmd, port=cmd.control_port)
 
-        # exit_code = process.wait()
-        #
-        # if exit_code == 0 or exit_code == 124:
-        #     print(f"✅ pktgen in pod {pod} completed successfully.")
-        # else:
-        #     print(f"❌ [ERROR] pktgen in pod {pod} exited with code {exit_code}")
-
         if cmd.debug:
             read_pktgen_stats(pod)
 
-        print(f"[✅] Finished pktgen setup for {pod}. Returning core assignment.")
+        logger.info(f"[✅] Finished pktgen setup for {pod}. Returning core assignment.")
         return main_core, tx_cores, all_core_str
 
-    # for i, pod in enumerate(tx_pods):
-    #
-    #
-    #     tx_core_list.append((main_core, tx_cores, all_core_str))
-
     args_list = [(i, pod, numa) for i, (pod, numa) in enumerate(zip(tx_pods, tx_numa))]
-    print(f"[🚀] TX pod worklist: {args_list}")
+    logger.info(f"[🚀] TX pod worklist: {args_list}")
 
     with ThreadPoolExecutor(max_workers=len(tx_pods)) as pool:
         results = list(pool.map(lambda a: run_for_pod(*a), args_list))
 
-    print(f"[🔍] Results returned from threads:")
+    logger.info(f"[🔍] Results returned from threads:")
     for idx, result in enumerate(results):
-        print(f"  → {tx_pods[idx]}: {result}")
+        logger.info(f"  → {tx_pods[idx]}: {result}")
 
     tx_core_list = [r for r in results if r is not None]
 
-    print(f"[📌] Final tx_core_list: {tx_core_list}")
+    logger.info(f"[📌] Final tx_core_list: {tx_core_list}")
     if len(tx_core_list) != len(tx_pods):
-        print(f"⚠️  Warning: Only {len(tx_core_list)} TX pods "
-              f"successfully launched pktgen out of {len(tx_pods)}")
+        logger.info(f"⚠️  Warning: Only {len(tx_core_list)} TX pods "
+                    f"successfully launched pktgen out of {len(tx_pods)}")
 
     return tx_core_list
 
@@ -1362,7 +1453,7 @@ def stop_testpmd_on_rx_pods(
     """Gracefully stop dpdk-testpmd on RX pods."""
     for pod in rx_pods:
         subprocess.run(f"kubectl exec {pod} -- pkill -SIGINT dpdk-testpmd", shell=True)
-        print(f"🛑 Stopped testpmd on {pod}")
+        logger.info(f"🛑 Stopped testpmd on {pod}")
 
 
 def build_stats_filename(
@@ -1426,7 +1517,7 @@ def collect_and_parse_rx_stats(
     os.makedirs(output_dir, exist_ok=True)
 
     for pod_name in rx_pods:
-        print(f"\n📥 Pulling stats.log from {pod_name}...")
+        logger.info(f"\n📥 Pulling stats.log from {pod_name}...")
 
         local_log = os.path.join(output_dir, f"{pod_name}_stats.log")
         local_warmup_log = os.path.join(output_dir, f"{pod_name}_warmup.log")
@@ -1437,9 +1528,9 @@ def collect_and_parse_rx_stats(
                 f"kubectl cp {pod_name}:{warmup_log_path} {local_warmup_log}",
                 shell=True, check=True
             )
-            print(f"📄 Warmup log saved as {local_warmup_log}")
+            logger.info(f"📄 Warmup log saved as {local_warmup_log}")
         except subprocess.CalledProcessError:
-            print(f"⚠️  No warmup log found for {pod_name}")
+            logger.info(f"⚠️  No warmup log found for {pod_name}")
 
         # copy stats log i.e RX stats
         try:
@@ -1448,16 +1539,16 @@ def collect_and_parse_rx_stats(
                 shell=True, check=True
             )
 
-            print(f"✅ {local_log} copied.")
+            logger.info(f"✅ {local_log} copied.")
 
             with open(local_log, "r") as f:
                 lines = f.readlines()
 
             stats = parse_testpmd_log(lines)
-            print(f"\n📈 Stats for {pod_name}:")
+            logger.info(f"\n📈 Stats for {pod_name}:")
 
             for key, arr in stats.items():
-                print(f"{key}: mean={arr.mean():.2f}, min={arr.min()}, max={arr.max()}")
+                logger.info(f"{key}: mean={arr.mean():.2f}, min={arr.min()}, max={arr.max()}")
 
             out_file = build_stats_filename(
                 pod_name=pod_name,
@@ -1471,10 +1562,10 @@ def collect_and_parse_rx_stats(
             out_path = os.path.join(output_dir, out_file)
 
             np.savez(out_path, **stats)
-            print(f"💾 Saved parsed stats to {out_path}")
+            logger.info(f"💾 Saved parsed stats to {out_path}")
 
         except Exception as e:
-            print(f"❌ Failed for {pod_name}: {e}")
+            logger.info(f"❌ Failed for {pod_name}: {e}")
 
 
 def collect_and_parse_tx_stats(
@@ -1506,7 +1597,7 @@ def collect_and_parse_tx_stats(
         rate_file = os.path.join(output_dir, f"{pod_name}_port_rate_stats.csv")
         port_file = os.path.join(output_dir, f"{pod_name}_port_stats.csv")
 
-        print(f"\n📥 Pulling TX stats from {pod_name}...")
+        logger.info(f"\n📥 Pulling TX stats from {pod_name}...")
 
         try:
             subprocess.run(
@@ -1521,12 +1612,12 @@ def collect_and_parse_tx_stats(
             rate_stats, _ = parse_pktgen_port_rate_csv(rate_file)
             port_stats, _ = parse_pktgen_port_stats_csv(port_file)
 
-            print(f"✅ {rate_file} and {port_file} copied.")
+            logger.info(f"✅ {rate_file} and {port_file} copied.")
             combined_stats = {**rate_stats, **port_stats}
 
-            print(f"\n📊 TX Stats Summary for {pod_name}:")
+            logger.info(f"\n📊 TX Stats Summary for {pod_name}:")
             for key, arr in combined_stats.items():
-                print(f"{key}: mean={arr.mean():.2f}, min={arr.min()}, max={arr.max()}")
+                logger.info(f"{key}: mean={arr.mean():.2f}, min={arr.min()}, max={arr.max()}")
 
             out_file = build_stats_filename(
                 pod_name=pod_name,
@@ -1540,10 +1631,10 @@ def collect_and_parse_tx_stats(
             out_path = os.path.join(output_dir, out_file)
 
             np.savez(out_path, **combined_stats)
-            print(f"💾 Saved TX stats to {out_path}")
+            logger.info(f"💾 Saved TX stats to {out_path}")
 
         except Exception as e:
-            print(f"❌ Failed to collect TX stats for {pod_name}: {e}")
+            logger.info(f"❌ Failed to collect TX stats for {pod_name}: {e}")
 
 
 def generate_experiment_id(
@@ -1566,19 +1657,19 @@ def debug_dump_npz_results(
     :return:
     """
     from glob import glob
-    print("\n🧪 DEBUG: Dumping parsed .npz result files:")
+    logger.info("\n🧪 DEBUG: Dumping parsed .npz result files:")
     for npz_file in sorted(glob(os.path.join(result_dir, "*.npz"))):
-        print(f"\n📂 {npz_file}")
+        logger.info(f"\n📂 {npz_file}")
         try:
             data = np.load(npz_file)
             for key in data:
                 arr = data[key]
-                print(f"🔹 {key}: shape={arr.shape}, "
-                      f"mean={arr.mean():.2f}, "
-                      f"min={arr.min()}, "
-                      f"max={arr.max()}")
+                logger.info(f"🔹 {key}: shape={arr.shape}, "
+                            f"mean={arr.mean():.2f}, "
+                            f"min={arr.min()}, "
+                            f"max={arr.max()}")
         except Exception as e:
-            print(f"❌ Failed to read {npz_file}: {e}")
+            logger.info(f"❌ Failed to read {npz_file}: {e}")
 
 
 def send_pktgen_stop(
@@ -1595,7 +1686,7 @@ def send_pktgen_stop(
     lua_stop_cmd = f"echo 'pktgen.stop(0)' | socat - TCP4:localhost:{control_port}"
     kubectl_cmd = f"kubectl exec {pod} -- sh -c \"{lua_stop_cmd}\""
 
-    print(f"🛑 Sending stop command to Pktgen on pod {pod} (port {control_port})")
+    logger.info(f"🛑 Sending stop command to Pktgen on pod {pod} (port {control_port})")
     try:
         result = subprocess.run(
             kubectl_cmd,
@@ -1606,15 +1697,15 @@ def send_pktgen_stop(
         )
 
         if result.returncode == 0:
-            print(f"✅ pktgen.stop(0) sent successfully to {pod}")
+            logger.info(f"✅ pktgen.stop(0) sent successfully to {pod}")
             return True
         else:
-            print(f"⚠️ [WARNING] Failed to send stop to {pod} (exit={result.returncode})")
-            print(result.stderr.decode())
+            logger.info(f"⚠️ [WARNING] Failed to send stop to {pod} (exit={result.returncode})")
+            logger.info(result.stderr.decode())
             return False
 
     except subprocess.TimeoutExpired:
-        print(f"⏱️ Timeout while sending pktgen.stop(0) to {pod}")
+        logger.info(f"⏱️ Timeout while sending pktgen.stop(0) to {pod}")
         return False
 
 
@@ -1622,35 +1713,39 @@ def main_start_generator(
         cmd: argparse.Namespace
 ) -> None:
     """ Starts dpdk_testpmd on RX pods and pktgen on TX pods unless skipped via flags.
-    :param cmd:
-    :return:
+    :param cmd: args
+    :return: Nothing
     """
     tx_pods, rx_pods = get_pods()
     tx_macs, rx_macs, tx_numa, rx_numa, tx_nodes, rx_nodes = collect_pods_related(tx_pods, rx_pods)
 
     # we always should have valid pairs. if we don't something is wrong here.
     if len(tx_pods) != len(rx_pods):
-        raise RuntimeError(f"❌ Pod count mismatch: {len(tx_pods)} TX pods vs {len(rx_pods)} RX pods")
+        raise RuntimeError(f"❌ Pod count mismatch: "
+                           f"{len(tx_pods)} TX pods vs {len(rx_pods)} RX pods")
 
     if len(tx_macs) != len(tx_pods):
-        raise RuntimeError(f"❌ TX MAC count mismatch: {len(tx_macs)} MACs for {len(tx_pods)} TX pods")
+        raise RuntimeError(f"❌ TX MAC count mismatch:"
+                           f" {len(tx_macs)} MACs for {len(tx_pods)} TX pods")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     expid = hashlib.md5(f"{cmd.profile}_{timestamp}".encode()).hexdigest()[:8]
     base_output_dir = os.path.join("results", f"{expid}")
 
-    print(f"📁 Results will be saved in: {base_output_dir}")
+    logger.info(f"📁 Results will be saved in: {base_output_dir}")
+
+    generate_sampling_lua_script()
 
     if not cmd.skip_copy:
         copy_flows_to_pods(tx_pods, rx_pods)
     else:
-        print("⏭️  Skipping Lua profile copy step (--skip-copy)")
+        logger.info("⏭️  Skipping Lua profile copy step (--skip-copy)")
 
     rx_core_list = []
     if not cmd.skip_testpmd:
         rx_core_list = start_dpdk_testpmd(rx_pods, rx_numa, tx_macs, cmd)
     else:
-        print("⏭️  Skipping testpmd launch on RX pods (--skip-testpmd)")
+        logger.info("⏭️  Skipping testpmd launch on RX pods (--skip-testpmd)")
 
     move_pktgen_profiles(tx_pods)
     tx_core_list = start_pktgen_on_tx_pods(tx_pods, tx_numa, cmd)
@@ -1658,16 +1753,16 @@ def main_start_generator(
     time.sleep(60)
     stop_testpmd_on_rx_pods(rx_pods)
 
-    print("✅ Test run complete. Collecting stats...")
+    logger.info("✅ Test run complete. Collecting stats...")
 
     # if any pod failed we will not have same pairs.
     # TOOD add logic to handle only successfully pairs
     if len(tx_core_list) != len(tx_pods):
-        print(f"⚠️  Warning: Only {len(tx_core_list)} "
-              f"TX pods successfully launched pktgen out of {len(tx_pods)}")
+        logger.info(f"⚠️  Warning: Only {len(tx_core_list)} "
+                    f"TX pods successfully launched pktgen out of {len(tx_pods)}")
     if len(rx_core_list) != len(rx_pods):
-        print(f"⚠️  Warning: Only {len(rx_core_list)} "
-              f"RX pods successfully launched testpmd out of {len(rx_pods)}")
+        logger.info(f"⚠️  Warning: Only {len(rx_core_list)} "
+                    f"RX pods successfully launched testpmd out of {len(rx_pods)}")
 
     for i, (tx_pod, rx_pod) in enumerate(zip(tx_pods, rx_pods)):
         # // trade block or sub-process
@@ -1677,7 +1772,7 @@ def main_start_generator(
         rx_main, rx_cores, rx_all = rx_core_list[i]
 
         pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", args.profile.split(".")[0])
-        print(f"📁 Results will be saved in: {pair_dir}")
+        logger.info(f"📁 Results will be saved in: {pair_dir}")
         os.makedirs(pair_dir, exist_ok=True)
 
         write_pair_metadata(
@@ -1718,7 +1813,7 @@ def main_start_generator(
         if cmd.debug:
             debug_dump_npz_results(pair_dir)
 
-    print("📁 All results saved in 'results/' directory.")
+    logger.info("📁 All results saved in 'results/' directory.")
 
 
 def parse_int_list(csv: str) -> List[int]:
@@ -1834,7 +1929,7 @@ def render_paired_lua_profile(
 
             pkt_size=pkt_size
         ))
-    print(f"[✔] Generated: {output_file}")
+    logger.info(f"[✔] Generated: {output_file}")
 
 
 def upload_npz_to_wandb(
@@ -1852,7 +1947,7 @@ def upload_npz_to_wandb(
     for file in os.listdir(result_dir):
         if file.endswith(".npz"):
             file_path = os.path.join(result_dir, file)
-            print(f"📤 Uploading {file} to wandb...")
+            logger.info(f"📤 Uploading {file} to wandb...")
             wandb.save(file_path)
 
     wandb.finish()
@@ -1864,7 +1959,7 @@ def main(cmd: argparse.Namespace) -> None:
     :return:
     """
     tx_pods, rx_pods = get_pods()
-    tx_macs, rx_macs, tx_numa, rx_numa = collect_pods_related(tx_pods, rx_pods)
+    tx_macs, rx_macs, tx_numa, rx_numa, tx_nodes, rx_nodes = collect_pods_related(tx_pods, rx_pods)
     os.makedirs("flows", exist_ok=True)
 
     flow_counts = parse_int_list(cmd.flows)
@@ -1874,7 +1969,7 @@ def main(cmd: argparse.Namespace) -> None:
     for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(
             tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
         d = f"flows/{t}-{r}"
-        print(t, r, tx_mac, rx_mac, tx_numa, rx_numa)
+        logger.info(t, r, tx_mac, rx_mac, tx_numa, rx_numa)
         os.makedirs(d, exist_ok=True)
         for num_flows, rate, pkt_size in product(flow_counts, rates, pkt_sizes):
             render_paired_lua_profile(
@@ -1922,14 +2017,14 @@ def upload_npz_to_wandb(result_dir="results", expid=None):
         npz_files = [f for f in npz_files if expid in os.path.basename(f)]
 
     if not npz_files:
-        print(f"⚠️ No .npz files found for expid={expid} in {result_dir}")
+        logger.info(f"⚠️ No .npz files found for expid={expid} in {result_dir}")
         return
 
     run_name = f"pktgen_run_{expid}" if expid else f"pktgen_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     wandb.init(project="dpdk-benchmarks", name=run_name)
 
     for file in npz_files:
-        print(f"📤 Logging metrics from: {file}")
+        logger.info(f"📤 Logging metrics from: {file}")
         data = np.load(file)
 
         # Convert to series-style logging
@@ -1946,7 +2041,94 @@ def upload_npz_to_wandb(result_dir="results", expid=None):
 def is_power_of_two(n): return n > 0 and (n & (n - 1)) == 0
 
 
+def setup_logging(
+        log_level: str,
+        log_output: str = "console",
+        log_file: str = "benchmark.log"
+):
+    """
+
+    :param log_level:
+    :param log_output:
+    :param log_file:
+    :return:
+    """
+    handlers = []
+
+    console_formatter = logging.Formatter("%(message)s")
+    file_formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"
+    )
+
+    if log_output in ("console", "both"):
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(console_formatter)
+        handlers.append(console_handler)
+
+    if log_output in ("file", "both"):
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(file_formatter)
+        handlers.append(file_handler)
+
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        handlers=handlers
+    )
+
+
+def clean_up(cmd: argparse.Namespace):
+    """This routine cleanup on interrupts  (KeyboardInterrupt) etc
+     - Kill tmux session
+    - Stop testpmd on RX pods
+    - Kill pktgen in TX pods
+    :param cmd:
+    :return:
+    """
+
+    tx_pods, rx_pods = get_pods()
+
+    try:
+        stop_testpmd_on_rx_pods(rx_pods)
+        logger.info("🧼 Stopped testpmd on all RX pods")
+    except Exception as e:
+        logger.error(f"❌ Failed to stop testpmd: {e}")
+
+    try:
+        for pod in tx_pods:
+            subprocess.run(
+                ["kubectl", "exec", pod, "--", "pkill", "-9", "pktgen"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        logger.info("🧯 Force-killed pktgen in TX pods")
+
+        # delete stale files inside each tx pod
+        for pod in tx_pods:
+            subprocess.run(
+                ["kubectl", "exec", pod, "--", "rm", "-f", "/tmp/*.csv", "/sample_pktgen.lua"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        logger.info("🗑️  Removed temporary CSV and Lua files from TX pods")
+
+
+    except Exception as e:
+        logger.error(f"❌ Failed to kill pktgen in TX pods: {e}")
+
+    logger.warning("🧹 Starting cleanup...")
+    session = f"pktgen_{cmd.profile.split('.')[0]}"
+    try:
+        kill_tmux_session(session)
+        logger.info(f"🧹 Killed tmux session: {session}")
+    except Exception as e:
+        logger.error(f"❌ Failed to kill tmux session: {e}")
+
+
 if __name__ == '__main__':
+
+
+    if not shutil.which("kubectl"):
+        raise RuntimeError("❌ 'kubectl' is not found in PATH. Please install or configure it properly.")
 
     parser = argparse.ArgumentParser(
         description="""🧪 DPDK Lua Flow Generator & Test Driver
@@ -2041,6 +2223,25 @@ if __name__ == '__main__':
                        help="🔁 Number of samples to collect. "
                             "If not set, will use duration/sample-interval")
     start.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
+
+    start.add_argument(
+        "--log-output",
+        choices=["console", "file", "both"],
+        default="console",
+        help="Where to log: 'console', 'file', or 'both' (default: console)"
+    )
+    start.add_argument(
+        "--log-file",
+        default="benchmark.log",
+        help="Log file name if using file or both (default: benchmark.log)"
+    )
+
+    start.add_argument(
         "--debug", action="store_true",
         help="🔍 Debug: Load and display contents of .npz results after test"
     )
@@ -2075,6 +2276,13 @@ if __name__ == '__main__':
     upload.add_argument("--result-dir", type=str, default="results", help="Directory containing .npz results")
 
     args = parser.parse_args()
+
+    log_level = getattr(args, "log_level", "INFO")
+    log_output = getattr(args, "log_output", "console")
+    log_file = getattr(args, "log_file", "benchmark.log")
+
+    setup_logging(args.log_level, args.log_output, args.log_file)
+
     if args.command == "start_generator":
         if args.profile not in available_profiles:
             print(f"\n❌ Invalid profile: {args.profile}")
@@ -2100,6 +2308,17 @@ if __name__ == '__main__':
             raise ValueError("❌ --txd must be a power of 2.")
         if not is_power_of_two(args.rxd):
             raise ValueError("❌ --rxd must be a power of 2.")
-        main_start_generator(args)
+        try:
+            main_start_generator(args)
+        except KeyboardInterrupt:
+            logger.warning("🛑 KeyboardInterrupt received! Attempting cleanup...")
+            session = f"pktgen_{args.profile.split('.')[0]}"
+            try:
+                session = f"pktgen_{args.profile.split('.')[0]}"
+                kill_tmux_session(session)
+                logger.info(f"🧹 Killed tmux session: {session}")
+            except Exception as e:
+                logger.error(f"❌ Failed to kill tmux session: {e}")
+
     elif args.command == "upload_wandb":
         upload_npz_to_wandb(result_dir=args.result_dir, expid=args.expid)

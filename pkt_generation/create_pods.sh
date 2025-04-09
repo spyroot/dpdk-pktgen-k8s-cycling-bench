@@ -89,6 +89,28 @@ SRIOV_RESOURCE_NAME="intel.com/sriov"
 
 OPT_SAME_NODE="true"
 OPT_DRY_RUN="false"
+SHOW_HELP=false
+
+if ! command -v kubectl >/dev/null 2>&1; then
+    echo "❌ 'kubectl' not found. Please ensure it's installed and in your PATH."
+    exit 1
+fi
+
+if (( DEFAULT_MEM_GB <= 0 )); then
+    echo "❌ Memory per pod must be greater than 0 GiB."
+    exit 1
+fi
+
+if [ ! -f ".yamllint" ]; then
+  echo "⚙️  Generating default .yamllint config..."
+  cat <<EOF > .yamllint
+rules:
+  line-length:
+    max: 120
+    level: warning
+EOF
+fi
+
 
 function get_k8s_resource_name() {
     local resource_key="$1"
@@ -113,7 +135,129 @@ fi
 
 export KUBECONFIG="$KUBECONFIG_FILE"
 
-# Clean up existing tx* or rx* pods
+
+# ---------------------------
+# Helper: usage
+# ---------------------------
+function display_help() {
+    echo -e "🧪 \033[1mDPDK Kubernetes Pod Generator\033[0m"
+    echo ""
+    echo "This script generates and optionally deploys TX–RX pod pairs using DPDK or SR-IOV NICs."
+    echo ""
+    echo "🛠️  Usage:"
+    echo "  ./create_pods.sh [options]"
+    echo ""
+    echo "📦 Options:"
+    echo "  -n | --pairs <num>       🔁 Number of TX–RX pairs to create (default: $DEFAULT_NUM_PAIRS)"
+    echo "  -s | --same-node         📍 Place TX and RX pods on the same worker node"
+    echo "  -c | --cpu <int>         🧠 CPU cores per pod (default: $DEFAULT_CPU)"
+    echo "  -m | --memory <int>      💾 Memory in GiB per pod (default: $DEFAULT_MEM_GB)"
+    echo "  -d | --dpdk <int>        🚀 DPDK NIC resource count (default: $DEFAULT_NUM_DPDK)"
+    echo "  -v | --vf <int>          🧩 SR-IOV VF count (default: $DEFAULT_NUM_SRIOV_VF)"
+    echo "  -g | --hugepages <int>   🧱 Hugepages in GiB (default: $DEFAULT_HUGEPAGES)"
+    echo "  -i | --image <image>     📦 Docker image to use (default: $DEFAULT_IMAGE)"
+    echo "  -r | --resource <type>   🌐 Resource type to use: 'dpdk' or 'sriov'"
+    echo "  -y | --dry-run           📝 Generate YAML only, do not deploy pods"
+    echo "  -h | --help              📖 Show this help message"
+    echo ""
+    echo "📌 Notes:"
+    echo "  - Pods are labeled with role=tx or role=rx."
+    echo "  - You can filter with:"
+    echo "      ▸ kubectl get pods -l role=tx"
+    echo "      ▸ kubectl get pods -l role=rx"
+    echo ""
+    echo "🚀 Examples:"
+    echo "  ▸ 🔁 Same k8s worker node (TX and RX on the same worker node):"
+    echo "      ./create_pods.sh -n 2 -c 4 -m 8 -d 2 -g 2 -s"
+    echo ""
+    echo "  ▸ 🔀 Different k8s worker nodes (TX and RX on separate nodes):"
+    echo "      ./create_pods.sh -n 2 -c 4 -m 8 -d 2 -g 2"
+    echo ""
+    echo "  ▸ 📝 Dry-Run Only (generate YAML, do not apply):"
+    echo "      ./create_pods.sh -n 2 --dry-run"
+    echo ""
+    echo "  ▸ Generate pod YAML only, without applying to the cluster:"
+    echo "      ./create_pods.sh -n 2 --dry-run"
+    echo ""
+    echo "💡 Make sure the device plugin is running and your nodes have the correct resource labels."
+}
+
+
+function validate_integer() {
+    local re='^[0-9]+$'
+    if ! [[ $1 =~ $re ]] ; then
+        echo "Error: $1 must be a positive integer." >&2
+        exit 1
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == *=* ]]; then
+        echo "❌ Unsupported argument format: $1"
+        echo "   Please use space-separated options like '-c 2', not '--cpu=2'"
+        exit 1
+    fi
+    case "$1" in
+        -s|--same-node)
+            OPT_SAME_NODE="true"
+            shift
+            ;;
+        -i|--image)
+            CUSTOM_IMAGE="$2"
+            shift 2
+            ;;
+        -n|--pairs)
+            validate_integer "$2"
+            DEFAULT_NUM_PAIRS=$2
+            shift 2
+            ;;
+        -c|--cpu)
+            validate_integer "$2"
+            DEFAULT_CPU=$2
+            shift 2
+            ;;
+        -m|--memory)
+            validate_integer "$2"
+            DEFAULT_MEM_GB=$2
+            shift 2
+            ;;
+        -d|--dpdk)
+            validate_integer "$2"
+            DEFAULT_NUM_DPDK=$2
+            shift 2
+            ;;
+        -v|--vf)
+            validate_integer "$2"
+            DEFAULT_NUM_SRIOV_VF=$2
+            shift 2
+            ;;
+        -g|--hugepages)
+            validate_integer "$2"
+            DEFAULT_HUGEPAGES=$2
+            shift 2
+            ;;
+        -y|--dry-run)
+            OPT_DRY_RUN="true"
+            shift
+            ;;
+        -r|--resource)
+            USER_NETWORK_RESOURCE_TYPE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            display_help
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown option: $1"
+            display_help
+            exit 1
+            ;;
+    esac
+done
+
+
+# clean up existing tx* or rx* pods
 PODS=$(kubectl get pods -o=name | grep -E 'tx|rx' || true)
 if [ -n "$PODS" ]; then
   echo "Deleting matching pods: $PODS"
@@ -134,96 +278,6 @@ fi
 echo "Creating target dir"
 # Create a directory to store the generated Pod YAML files
 mkdir -p pods
-
-# ---------------------------
-# Helper: usage
-# ---------------------------
-function display_help() {
-    echo "Usage: $0 [options]"
-    echo "  -s                  Deploy rx on the same node as tx"
-    echo "  -i <image>          Container image for pods (default: $DEFAULT_IMAGE)"
-    echo "  -n <num_pairs>      Number of tx-rx pairs (default: $DEFAULT_NUM_PAIRS)"
-    echo "  -c <cpu_cores>      CPU request/limit per pod (default: $DEFAULT_CPU)"
-    echo "  -m <mem_mib>        Memory request/limit per pod, in Gb (default: $DEFAULT_MEM_GB)"
-    echo "  -d <dpdk_count>     DPDK VF resource per pod (default: $DEFAULT_NUM_DPDK)"
-    echo "  -v <vf_count>       Kernel VF resource per pod (default: $DEFAULT_NUM_SRIOV_VF)"
-    echo "  -g <huge_gib>       1Gi hugepages limit per pod (default: $DEFAULT_HUGEPAGES)"
-    echo "  -y | --dry-run      Generate YAML files but do not apply them"
-    echo ""
-    echo "Example: $0 -n 1 -c 4 -m 8000 -d 2 -v 2 -g 2 -s"
-    echo "         (Creates 1 pair: tx0 + rx0, each with 4 CPU, 8 GiB, etc., on the same node.)"
-    echo ""
-    echo "         $0 -n 1 --dry-run"
-    echo "         (Generate the YAML but do not kubectl apply, so you can inspect it.)"
-}
-
-function validate_integer() {
-    local re='^[0-9]+$'
-    if ! [[ $1 =~ $re ]] ; then
-        echo "Error: $1 must be a positive integer." >&2
-        exit 1
-    fi
-}
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -s)
-            OPT_SAME_NODE="true"
-            shift
-            ;;
-        -i)
-            CUSTOM_IMAGE="$2"
-            shift 2
-            ;;
-        -n)
-            validate_integer "$2"
-            DEFAULT_NUM_PAIRS=$2
-            shift 2
-            ;;
-        -c)
-            validate_integer "$2"
-            DEFAULT_CPU=$2
-            shift 2
-            ;;
-        -m)
-            validate_integer "$2"
-            DEFAULT_MEM_GB=$2
-            shift 2
-            ;;
-        -r)
-            USER_NETWORK_RESOURCE_TYPE="$2"
-            shift 2
-            ;;
-        -d)
-            validate_integer "$2"
-            DEFAULT_NUM_DPDK=$2
-            shift 2
-            ;;
-        -v)
-            validate_integer "$2"
-            DEFAULT_NUM_SRIOV_VF=$2
-            shift 2
-            ;;
-        -g)
-            validate_integer "$2"
-            DEFAULT_HUGEPAGES=$2
-            shift 2
-            ;;
-        -y|--dry-run)
-            OPT_DRY_RUN="true"
-            shift
-            ;;
-        -h|--help)
-            display_help
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            display_help
-            exit 1
-            ;;
-    esac
-done
 
 
 function validate_network_resource() {
@@ -310,6 +364,7 @@ if [ "$OPT_SAME_NODE" = "false" ]; then
     fi
 fi
 
+
 if [ "$OPT_SAME_NODE" = "true" ]; then
     echo "Deploying all pods on the same node."
     node=$(kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' --no-headers | awk 'NR==1{print $1}')
@@ -335,7 +390,29 @@ echo "Tx node: $tx_node"
 echo "Rx node: $rx_node"
 echo "-------------------------------------------------------"
 
-# Take POD template and produce POD templates for all TXs, RXs.
+if [ "$tx_node" = "$rx_node" ]; then
+    echo "🔁 Topology Mode: Single Worker Node (TX and RX on same node)"
+else
+    echo "🔀 Topology Mode: Multi-Worker Node (TX and RX on different nodes)"
+fi
+
+# a check if num pairs > then what we have in CaaS
+MAX_PAIRS=$((${#MAC_ADDRESSES[@]} / 2))
+if [ "$DEFAULT_NUM_PAIRS" -gt "$MAX_PAIRS" ]; then
+    echo "❌ Error: Only $MAX_PAIRS pairs supported with current MAC/PCI definitions."
+    exit 1
+fi
+
+if (( ${#MAC_ADDRESSES[@]} % 2 != 0 )) || (( ${#PCI_ADDRESSES[@]} % 2 != 0 )); then
+    echo "⚠️ Warning: MAC or PCI address arrays contain an odd number of entries. Pairs will be truncated."
+fi
+
+if [ ! -f "$POD_TEMPLATE" ]; then
+    echo "❌ Template file $POD_TEMPLATE not found."
+    exit 1
+fi
+
+# take POD template and produce POD templates for all TXs, RXs.
 MEMORY_REQUEST="${DEFAULT_MEM_GB}"
 MEMORY_LIMIT="${DEFAULT_MEM_GB}"
 CPU_REQUEST="$DEFAULT_CPU"
@@ -403,18 +480,30 @@ for i in $(seq 0 $((DEFAULT_NUM_PAIRS - 1))); do
     echo "Generated POD spec YAML for $tx_name (TX) and $rx_name (RX)."
 
     if [ "$OPT_DRY_RUN" = "false" ]; then
-        echo "Applying $tx_name and $rx_name to cluster..."
+        echo "🚀 Applying $tx_name and $rx_name to the cluster..."
         kubectl apply -f "pods/pod-$tx_name.yaml"
         kubectl apply -f "pods/pod-$rx_name.yaml"
+        echo "✅ Successfully applied $tx_name and $rx_name"
     else
-        echo "[DRY-RUN] Skipping apply for $tx_name and $rx_name."
+      echo "📝 [DRY-RUN] Skipping apply for $tx_name and $rx_name."
     fi
 done
 
 echo "-------------------------------------------------------"
+
 if [ "$OPT_DRY_RUN" = "true" ]; then
+    echo "🧪 Validating generated YAMLs..."
+    for file in pods/pod-*.yaml; do
+        if kubectl apply --dry-run=client -f "$file" >/dev/null 2>&1; then
+            echo "✅ $file: valid"
+        else
+            echo "❌ $file: failed validation"
+        fi
+    done
+
     echo "Dry-run mode: no pods were actually created."
     echo "Check 'pods/' folder to see the rendered YAML."
 else
-    echo "Done! Created $DEFAULT_NUM_PAIRS pairs of tx–rx pods."
+    echo "✅ Done! Created $DEFAULT_NUM_PAIRS pairs of tx–rx pods."
 fi
+
