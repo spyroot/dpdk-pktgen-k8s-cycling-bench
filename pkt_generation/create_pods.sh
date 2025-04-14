@@ -74,7 +74,7 @@ DEFAULT_CPU=2           # CPU cores
 DEFAULT_MEM_GB=2        # memory in Gb
 DEFAULT_NUM_DPDK=1      # default number of nic for DPDK
 DEFAULT_NUM_SRIOV_VF=1  # default number for nic for SRIOV kernel mode
-DEFAULT_HUGEPAGES=2     # hugepages in Gi
+DEFAULT_HUGEPAGES=$(( DEFAULT_CPU - 1 ))
 DEFAULT_IMAGE="spyroot/dpdk-pktgen-k8s-cycling-bench-trex:latest-amd64"
 
 # this a class we expect , match the name if you have something different.
@@ -90,6 +90,7 @@ SRIOV_RESOURCE_NAME="intel.com/sriov"
 OPT_SAME_NODE="true"
 OPT_DRY_RUN="false"
 SHOW_HELP=false
+USER_SET_HUGEPAGES="false"
 
 if ! command -v kubectl >/dev/null 2>&1; then
     echo "❌ 'kubectl' not found. Please ensure it's installed and in your PATH."
@@ -234,6 +235,7 @@ while [[ $# -gt 0 ]]; do
         -g|--hugepages)
             validate_integer "$2"
             DEFAULT_HUGEPAGES=$2
+            USER_SET_HUGEPAGES="true"
             shift 2
             ;;
         -y|--dry-run)
@@ -418,6 +420,33 @@ MEMORY_LIMIT="${DEFAULT_MEM_GB}"
 CPU_REQUEST="$DEFAULT_CPU"
 CPU_LIMIT="$DEFAULT_CPU"
 HUGEPAGES_LIMIT="${DEFAULT_HUGEPAGES}"
+
+if (( DEFAULT_CPU % 2 == 0 )); then
+    echo "❌ CPU core count must be an odd number (e.g., 3, 5, 7)."
+    echo "   1 main core + even number of worker cores is required for TX/RX split."
+    exit 1
+fi
+
+if [ "$USER_SET_HUGEPAGES" = "true" ] && (( DEFAULT_HUGEPAGES > (DEFAULT_CPU - 1) )); then
+    echo "ℹ️  Note: You requested more hugepages than TX/RX cores."
+    echo "    Typically, only packet-processing cores need 1Gi each."
+fi
+
+# we auto-adjust hugepages if not set i.e. 1G per TX/RX core
+if [ "$USER_SET_HUGEPAGES" = "false" ]; then
+    if (( DEFAULT_CPU > 1 )); then
+        DEFAULT_HUGEPAGES=$(( DEFAULT_CPU - 1 ))
+    else
+        DEFAULT_HUGEPAGES=1
+    fi
+    echo "📐 Auto-adjusted hugepages: ${DEFAULT_HUGEPAGES}Gi (1Gi per TX/RX core)"
+else
+    EXPECTED_HUGEPAGES=$(( DEFAULT_CPU - 1 ))
+    if (( DEFAULT_HUGEPAGES < EXPECTED_HUGEPAGES )); then
+        echo "⚠️  Warning: You specified fewer hugepages (${DEFAULT_HUGEPAGES}) than TX/RX cores (${EXPECTED_HUGEPAGES})."
+        echo "    This may lead to allocation failures or degraded performance."
+    fi
+fi
 
 for i in $(seq 0 $((DEFAULT_NUM_PAIRS - 1))); do
 

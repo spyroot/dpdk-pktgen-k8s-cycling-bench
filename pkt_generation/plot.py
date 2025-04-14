@@ -1,19 +1,13 @@
-import subprocess
-import json
-import re
-import os
 import argparse
-import threading
-from ipaddress import ip_address
-from typing import List, Tuple
-import time
-from itertools import product
-import numpy as np
+import os
+import re
+import subprocess
 from datetime import datetime
-import matplotlib.pyplot as plt  # Importing matplotlib for plotting
+from typing import List
 
+import matplotlib.pyplot as plt
+import numpy as np
 
-# Existing LUA_UDP_TEMPLATE and other functions...
 
 def parse_testpmd_log(log_lines):
     """
@@ -161,7 +155,5 @@ if __name__ == '__main__':
     gen = subparsers.add_parser("generate_flow", help="🛠 Generate Pktgen Lua flows")
     gen.add_argument("--base-src-ip", default="192.168.1.1", help="Base source IP")
     gen.add_argument("--base-dst-ip", default="192.168.2.1", help="Base destination IP")
-    gen.add_argument("--base-src-port", default="1024", help="Base source
-    ::contentReference[oaicite:0]
-    {index = 0}
+    gen.add_argument("--base-src-port", default="1024", help="Base source")
 
