@@ -108,6 +108,7 @@ import sys
 import re
 import subprocess
 import tarfile
+import threading
 import time
 from datetime import datetime
 from ipaddress import ip_address
@@ -115,6 +116,7 @@ from itertools import product
 from typing import List, Optional, Union
 from typing import Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor
+import csv
 
 import numpy as np
 import wandb
@@ -127,7 +129,7 @@ import wandb
 
 logger = logging.getLogger(__name__)
 
-# this out template
+# this base lua for range flow template
 LUA_UDP_TEMPLATE = """\
 package.path = package.path ..";?.lua;test/?.lua;app/?.lua;"
 require "Pktgen"
@@ -313,10 +315,27 @@ main();
 """
 
 
-def parse_testpmd_log(log_lines):
+def parse_testpmd_log(
+        log_lines: List[str]
+) -> Dict[str, np.ndarray]:
     """
+    Parses DPDK testpmd log output and extracts RX/TX statistics.
+
+        Notes:
+        - If error/missed/nombuf stats are fewer than PPS entries, they're zero-padded.
+        - All numeric values are cast to integers.
+
     :param log_lines:
-    :return:
+    :return: Dict[str, np.ndarray]: A dictionary with the following keys:
+            - "rx_pps": RX packets per second
+            - "tx_pps": TX packets per second
+            - "rx_bytes": RX total bytes
+            - "tx_bytes": TX total bytes
+            - "rx_packets": RX packet count
+            - "tx_packets": TX packet count
+            - "rx_errors": RX error count (filled with 0s if missing)
+            - "rx_missed": RX missed packet count (filled with 0s if missing)
+            - "rx_nombuf": RX no-buffer count (filled with 0s if missing)
     """
     rx_pps_list = []
     tx_pps_list = []
@@ -335,52 +354,52 @@ def parse_testpmd_log(log_lines):
         # RX and TX pps
         if "Rx-pps:" in line:
             match = re.search(r"Rx-pps:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_pps_list.append(int(match.group(1)))
         elif "Tx-pps:" in line:
             match = re.search(r"Tx-pps:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 tx_pps_list.append(int(match.group(1)))
 
         # RX-bytes and TX-bytes
         elif "RX-bytes:" in line:
             match = re.search(r"RX-bytes:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_bytes_list.append(int(match.group(1)))
         elif "TX-bytes:" in line:
             match = re.search(r"TX-bytes:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 tx_bytes_list.append(int(match.group(1)))
 
         # RX and TX packets
         elif "RX-packets:" in line:
             match = re.search(r"RX-packets:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_packets_list.append(int(match.group(1)))
         elif "TX-packets:" in line:
             match = re.search(r"TX-packets:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 tx_packets_list.append(int(match.group(1)))
 
         # RX-missed
         elif "RX-missed:" in line:
             match = re.search(r"RX-missed:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_missed_list.append(int(match.group(1)))
 
         # RX-nombuf
         elif "RX-nombuf:" in line:
             match = re.search(r"RX-nombuf:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_nombuf_list.append(int(match.group(1)))
 
         # RX-errors
         elif "RX-errors:" in line:
             match = re.search(r"RX-errors:\s+(\d+)", line)
-            if match:
+            if match and match.group(1).isdigit():
                 rx_err_list.append(int(match.group(1)))
 
-    # Normalize error/missed/nombuf lengths
+    # normalize error/missed/nombuf lengths
     max_len = max(len(rx_pps_list), len(rx_err_list), len(rx_missed_list), len(rx_nombuf_list))
     rx_err_list += [0] * (max_len - len(rx_err_list))
     rx_missed_list += [0] * (max_len - len(rx_missed_list))
@@ -408,6 +427,15 @@ def get_increments_from_mode(
         mode: str, num_flows: int
 ):
     """
+    Determine which packet fields should be incremented based on flow generation mode.
+
+    Flow mode characters:
+        - 's': increment source IP
+        - 'd': increment destination IP
+        - 'S': increment source port
+        - 'D': increment destination port
+        - 'P': increment both source and destination ports
+
     :param mode:
     :param num_flows:
     :return:
@@ -427,6 +455,7 @@ def get_pods(
     """
     Fetch all pods and return txN and rxN separately.
     Tuple is pair txN t rxN,  where txN is a list of pod names.
+
     :return: Tuple[List[str], List[str]]: tx_pods and rx_pods
     :raise RuntimeError: if kubectl fails or no tx/rx pods are found
     """
@@ -461,6 +490,50 @@ def get_pods(
     return tx_pods, rx_pods
 
 
+def get_pci_port_map(
+        pod_name: str,
+        is_all_dev: bool = False
+) -> Dict[str, int]:
+    """
+    Map PCI address to DPDK port ID inside a pod using dpdk-testpmd output.
+
+    :param pod_name:
+    :param is_all_dev:
+    :return:
+    """
+    if not is_all_dev:
+        pci_env_cmd = f"kubectl exec {pod_name} -- sh -c 'echo $PCIDEVICE_INTEL_COM_DPDK'"
+        pci_result = subprocess.run(pci_env_cmd, shell=True, capture_output=True, text=True)
+        pci_addr = pci_result.stdout.strip()
+
+        if not pci_addr:
+            print(f"❌ Could not resolve PCI address inside {pod_name}")
+            return {}
+
+        print(f"🔍 [{pod_name}] PCI address: {pci_addr}")
+        testpmd_cmd = f"kubectl exec {pod_name} -- dpdk-testpmd -a {pci_addr} -- --disable-device-start"
+    else:
+        print(f"🔍 [{pod_name}] Probing all PCI devices")
+        testpmd_cmd = f"kubectl exec {pod_name} -- dpdk-testpmd -- --disable-device-start"
+
+    result = subprocess.run(testpmd_cmd, shell=True, capture_output=True, text=True)
+    output = result.stdout + result.stderr
+
+    pci_to_port = {}
+    port_id = 0
+
+    for line in output.splitlines():
+        match = re.search(r"device:\s+([0-9a-fA-F:.]+)", line)
+        if match:
+            pci = match.group(1)
+            pci_to_port[pci] = port_id
+            port_id += 1
+
+    if not pci_to_port:
+        print(f"⚠️ No PCI→port ID mapping found in {pod_name}")
+    return pci_to_port
+
+
 def get_mac_address(
         pod_name: str
 ) -> str:
@@ -484,6 +557,245 @@ def get_mac_address(
     full_output = result.stdout + result.stderr
     match = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", full_output)
     return match.group(0) if match else None
+
+
+def run_ssh_command(
+        esxi_host,
+        command,
+        password="VMware1!"
+):
+    """
+    Executes a remote SSH command on an ESXi host using `sshpass`.
+
+    :param esxi_host: IP or hostname of the ESXi host
+    :param command: Command and arguments to run (as list)
+    :param password: SSH password (default is 'VMware1!')
+    :return: Output of the command as a string
+    """
+    ssh_cmd = [
+                  "sshpass", "-p", password,
+                  "ssh", "-o", "StrictHostKeyChecking=no",
+                  f"root@{esxi_host}"
+              ] + command
+    try:
+        output = subprocess.check_output(ssh_cmd, text=True)
+        return output
+    except subprocess.CalledProcessError as e:
+        print(f"❌ SSH command failed on {esxi_host}: {e}")
+        return ""
+
+
+def get_vf_stats(
+        esxi_host: str,
+        nic_name: str,
+        vf_id: int
+) -> Dict[str, int]:
+    """
+    Retrieves statistics for a specific VF on a NIC from an ESXi host.
+
+    :param esxi_host: IP or hostname of the ESXi host
+    :param nic_name: Name of the NIC
+    :param vf_id: Virtual Function ID
+    :return: Dictionary of stat name → value
+    """
+    try:
+        output = run_ssh_command(
+            esxi_host,
+            ["esxcli", "network", "sriovnic", "vf", "stats", "-n", nic_name, "-v", str(vf_id)],
+        )
+        stats: Dict[str, int] = {}
+        for line in output.splitlines():
+            match = re.match(r"(.+?):\s+(\d+)", line.strip())
+            if match:
+                key = match.group(1).strip().replace(" ", "_").lower()
+                stats[key] = int(match.group(2))
+        logger.info("")
+        return stats
+    except Exception as e:
+        print(f"❌ Error fetching stats for VF {vf_id} on {nic_name}@{esxi_host}: {e}")
+        return {}
+
+
+def monitor_vf_stats_remote(
+        esxi_host: str,
+        nic_name: str,
+        interval: int,
+        duration: int,
+        output_dir: str = "results"
+) -> None:
+    """
+    Monitors VF stats for all active VFs on an ESXi host NIC
+    and writes to a CSV file.
+
+    :param esxi_host: ESXi hostname or IP
+    :param nic_name: NIC interface (e.g., vmnic3)
+    :param interval: Sampling interval in seconds
+    :param duration: Total monitoring duration in seconds
+    :param output_dir: Directory to save CSV output
+    """
+
+    logger.info(
+        f"🟢 Started ESXi monitor thread for host {esxi_host}, "
+        f"NIC {nic_name}, interval {interval}s, duration {duration}s")
+
+    if not esxi_host or not nic_name:
+        raise ValueError("❌ Invalid ESXi host or NIC name provided.")
+
+    if interval <= 0 or duration <= 0:
+        raise ValueError("❌ Sampling interval and duration must be positive integers.")
+
+    logger.info(f"🚀 Starting VF sampling thread on {esxi_host}:{nic_name} "
+                f"every {interval}s for {duration}s")
+
+    vfs = get_active_vfs(esxi_host, nic_name)
+    if not vfs:
+        logger.warning(f"⚠️ No active VFs found on {esxi_host} for {nic_name}")
+        return
+    logger.info(f"🔍 Found {len(vfs)} active VFs on {esxi_host} ({nic_name})")
+
+    os.makedirs(output_dir, exist_ok=True)
+    csv_file = os.path.join(output_dir, f"{esxi_host.replace('.', '_')}_{nic_name}_vf_stats.csv")
+
+    with open(csv_file, "w", newline="") as f:
+        writer: Optional[csv.DictWriter] = None
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            timestamp = datetime.utcnow().isoformat()
+            for vf in vfs:
+                stats = get_vf_stats(esxi_host, nic_name, vf)
+                if stats:
+                    stats["timestamp"] = timestamp
+                    stats["vf_id"] = vf
+                    stats["nic_name"] = nic_name
+                    stats["esxi_host"] = esxi_host
+
+                    if writer is None:
+                        fieldnames = list(stats.keys())
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+
+                    writer.writerow(stats)
+                    f.flush()
+            time.sleep(interval)
+
+
+def collect_cmdline_from_nodes(
+        pods: List[str],
+        nodes: List[str],
+        output_dir: str
+) -> Dict[str, str]:
+    """
+    Collects /proc/cmdline from one pod per unique node.
+
+    :param pods: List of pods (one per node is enough)
+    :param nodes: Corresponding node names
+    :param output_dir: Directory to store cmdline outputs
+    :return: Dictionary of node name -> cmdline string
+    """
+    seen_nodes = set()
+    cmdlines = {}
+
+    for pod, node in zip(pods, nodes):
+        if node in seen_nodes:
+            continue
+        seen_nodes.add(node)
+
+        try:
+            result = subprocess.run(
+                ["kubectl", "exec", pod, "--", "cat", "/proc/cmdline"],
+                capture_output=True, text=True, check=True
+            )
+            cmdline_output = result.stdout.strip()
+            cmdlines[node] = cmdline_output
+
+            file_path = os.path.join(output_dir, f"{node}_cmdline.txt")
+            with open(file_path, "w") as f:
+                f.write(cmdline_output + "\n")
+
+            logger.info(f"📝 Collected /proc/cmdline from node {node} (via pod {pod})")
+
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"⚠️ Failed to collect /proc/cmdline from {node} via {pod}: {e}")
+
+    return cmdlines
+
+
+def start_esxi_collector(
+        tx_nodes: List[str],
+        rx_nodes: List[str],
+        esxi_map: Dict[str, str],
+        cmd: argparse.Namespace,
+        base_output_dir: str
+) -> List[threading.Thread]:
+    """
+    Start background threads to collect VF stats from ESXi hosts.
+
+    For each unique ESXi host across all TX and RX Kubernetes nodes:
+
+    - If the node has a label 'node.cluster.x-k8s.io/esxi-host', it's mapped to the corresponding ESXi IP/hostname.
+    - A separate VF stats sampling thread is launched per unique ESXi host (even if multiple worker nodes reside on the same host).
+    - Output CSV files are saved under the profile directory of each pod pair (e.g., results/<expid>/tx0-rx0/<profile>/).
+
+    ⚠If any node is missing the ESXi host label, that node is skipped with a warning.
+
+    :param tx_nodes: List of TX node names (e.g., ['worker-1'])
+    :param rx_nodes: List of RX node names (e.g., ['worker-2'])
+    :param esxi_map: Dictionary mapping node name → ESXi hostname/IP from K8s node label
+    :param cmd: Parsed command-line arguments from argparse
+    :param base_output_dir: Root directory where result folders exist
+    :return: List of running background threads for VF stats monitoring
+    """
+
+    logger.info(f"🔍 Invoking start_esxi_collector... {esxi_map}")
+
+    esxi_seen = set()
+    esxi_nic_map = {}
+
+    profile_subdir = os.path.join(base_output_dir, "esxi_stats", cmd.profile.split(".")[0])
+    os.makedirs(profile_subdir, exist_ok=True)
+
+    for node in set(tx_nodes + rx_nodes):
+        esxi_host = esxi_map.get(node)
+        if not esxi_host:
+            logger.warning(f"⚠️ Node '{node}' is missing ESXi label. Skipping VF sampling for this node.")
+            continue
+
+        if esxi_host in esxi_seen:
+            continue
+
+        esxi_seen.add(esxi_host)
+        esxi_nic_map[(esxi_host, profile_subdir)] = cmd.nic_name
+
+    if not esxi_nic_map:
+        logger.warning("⚠️ No ESXi hosts detected from node labels. VF stats collection will be skipped.")
+        return []
+
+    logger.info("🔗 ESXi Host to NIC Mapping:")
+    for (host, path), nic in esxi_nic_map.items():
+        logger.info(f"  • {host} → {nic} → {path}")
+
+    vf_monitor_threads = []
+    for (esxi_host, output_dir), nic_name in esxi_nic_map.items():
+        logger.info(f"📄 VF stats for {esxi_host} ({nic_name}) will be saved to: {output_dir}")
+        t = threading.Thread(
+            target=monitor_vf_stats_remote,
+            args=(
+                esxi_host,
+                nic_name,
+                getattr(cmd, "sample_interval", 10),
+                getattr(cmd, "duration", 60) + 30,
+                output_dir
+            ),
+            daemon=True
+        )
+        t.start()
+        vf_monitor_threads.append(t)
+
+    logger.info(f"📡 Started VF stats monitoring for ESXi hosts: "
+                f"{[host for (host, _) in esxi_nic_map.keys()]}")
+
+    time.sleep(2)
+    return vf_monitor_threads
 
 
 def get_numa_cores(
@@ -765,10 +1077,32 @@ def write_pair_metadata(
         expid: str,
         timestamp: str,
         cmd: argparse.Namespace,
+        tx_esxi: str = None,
+        rx_esxi: str = None,
+        tx_cmdline: str = None,
+        rx_cmdline: str = None,
 ):
+    """    Write metadata.txt for a TX-RX pair into the given path.
+
+    :param path:
+    :param tx_pod:
+    :param rx_pod:
+    :param tx_mac:
+    :param rx_mac:
+    :param tx_numa:
+    :param rx_numa:
+    :param tx_node:
+    :param rx_node:
+    :param expid:
+    :param timestamp:
+    :param cmd:
+    :param tx_esxi:
+    :param rx_esxi:
+    :param tx_cmdline:
+    :param rx_cmdline:
+    :return:
     """
-    Write metadata.txt for a TX-RX pair into the given path.
-    """
+
     os.makedirs(path, exist_ok=True)
     metadata_path = os.path.join(path, "metadata.txt")
 
@@ -777,6 +1111,11 @@ def write_pair_metadata(
         f.write(f"expid={expid}\n")
         f.write(f"timestamp={timestamp}\n")
         f.write(f"profile={cmd.profile}\n\n")
+
+        if tx_esxi:
+            f.write(f"tx_esxi={tx_esxi}\n")
+        if rx_esxi:
+            f.write(f"rx_esxi={rx_esxi}\n")
 
         f.write(f"# Pod and Node Information\n")
         f.write(f"tx_pod={tx_pod}\n")
@@ -787,6 +1126,11 @@ def write_pair_metadata(
         f.write(f"rx_mac={rx_mac}\n")
         f.write(f"tx_numa={tx_numa}\n")
         f.write(f"rx_numa={rx_numa}\n\n")
+
+        if tx_cmdline:
+            f.write(f"tx_cmdline={tx_cmdline}\n")
+        if rx_cmdline:
+            f.write(f"rx_cmdline={rx_cmdline}\n")
 
         f.write(f"# Generator Configuration\n")
         for key, value in vars(cmd).items():
@@ -883,7 +1227,8 @@ def warmup_mac_learning(
         f"timeout {warmup_duration}s dpdk-testpmd -l {cores_str} -n 4 --socket-mem {socket_mem} "
         f"--proc-type auto --file-prefix warmup_{pod} "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
-        f"-- --forward-mode=txonly --eth-peer=0,{tx_mac} --auto-start --stats-period 1 > /output/warmup.log 2>&1"
+        f"-- --forward-mode=txonly --eth-peer=0,{tx_mac} "
+        f"--auto-start --stats-period 1 > /output/warmup.log 2>&1"
     )
     kubectl_cmd = f"kubectl exec {pod} -- sh -c '{warmup_cmd}'"
     result = subprocess.run(kubectl_cmd, capture_output=True, shell=True)
@@ -902,9 +1247,11 @@ def timeout_handler(exit_code):
 
   -    the exit status of COMMAND otherwise
 
+    TBD.
     :param exit_code:
     :return:
     """
+    pass
 
 
 def start_dpdk_testpmd(
@@ -995,7 +1342,7 @@ def start_dpdk_testpmd(
         testpmd_cmd = (
             f"timeout {timeout_duration} dpdk-testpmd --main-lcore {main_core} -l {all_core_str} -n 4 "
             f"--socket-mem {cmd.rx_socket_mem} "
-            f"--proc-type auto --file-prefix testpmd_rx "
+            f"--proc-type auto --file-prefix testpmd_rx_{pod} "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
             f"-- --forward-mode=rxonly --auto-start --stats-period 1 > /output/stats.log 2>&1 &"
         )
@@ -1207,7 +1554,7 @@ def launch_pktgen(
     pktgen_cmd = (
         f"cd /usr/local/bin; timeout {timeout_duration} pktgen --no-telemetry -l "
         f"{all_cores} -n 4 --socket-mem {cmd.tx_socket_mem} --main-lcore {main_core} "
-        f"--proc-type auto --file-prefix pg "
+        f"--proc-type auto --file-prefix pg_{pod} "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
         f"-- -G --txd={cmd.txd} --rxd={cmd.rxd} "
         f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0"
@@ -1217,6 +1564,10 @@ def launch_pktgen(
     window_name = pod
     subprocess.run(
         ["tmux", "send-keys", "-t", f"{session_name}:{window_name}", kubectl_cmd, "Enter"])
+
+    if cmd.debug:
+        logger.debug(f"[{pod}] 🔧 Full pktgen command:\n{pktgen_cmd}")
+        logger.debug(f"[{pod}] 🔧 Full kubectl exec command:\n{kubectl_cmd}")
 
     # if getattr(cmd, "use_tmux", False):
     #     pktgen_cmd = f"tmux new-session -d -s pktgen '{base_pktgen_cmd}'"
@@ -1672,6 +2023,48 @@ def debug_dump_npz_results(
             logger.info(f"❌ Failed to read {npz_file}: {e}")
 
 
+def pod_to_esxi_host_mapping() -> Dict[str, str]:
+    """
+    Retrieve a mapping of Kubernetes worker node names to
+    their corresponding ESXi host IPs or names.
+
+    This function inspects the node labels  `node.cluster.x-k8s.io/esxi-host`
+    to determine the ESXi host each worker node is running on.
+
+    (This only ESXi specific , on baremetal no op)
+
+    Returns:
+        dict: A dictionary where the keys are Kubernetes node names, and the values are the associated
+        ESXi host IPs or hostnames.
+              Example:
+              {
+                  "node-1": "10.192.18.5",
+                  "node-2": "10.192.18.9"
+              }
+
+    :return: Dict[str, str]: A dictionary where the keys are Kubernetes node names,
+             and the values are the associated
+    """
+    result = subprocess.run(
+        ["kubectl", "get", "nodes", "-o", "json"],
+        capture_output=True,
+        text=True
+    )
+    nodes = json.loads(result.stdout)
+    esxi_map = {}
+    for node in nodes["items"]:
+        node_name = node.get("metadata", {}).get("name")
+        labels = node.get("metadata", {}).get("labels", {})
+        esxi_host = labels.get("node.cluster.x-k8s.io/esxi-host")
+
+        if node_name and esxi_host:
+            esxi_map[node_name] = esxi_host
+        elif node_name:
+            logger.debug(f"🔍 Node '{node_name}' has no ESXi label — skipping.")
+
+    return esxi_map
+
+
 def send_pktgen_stop(
         pod: str,
         control_port: str,
@@ -1709,6 +2102,40 @@ def send_pktgen_stop(
         return False
 
 
+def get_active_vfs(
+        esxi_host,
+        nic_name
+):
+    """Fetch list of active VF IDs for a given NIC."""
+    try:
+        output = run_ssh_command(esxi_host, ["esxcli", "network", "sriovnic", "vf", "list", "-n", nic_name])
+        vfs = []
+        for line in output.splitlines():
+            match = re.match(r"\s*(\d+)\s+true", line)
+            if match:
+                vfs.append(int(match.group(1)))
+        return vfs
+    except Exception as e:
+        print(f"❌ Error fetching VF list from {esxi_host}: {e}")
+        return []
+
+
+def get_unicast_pkt_counts(nic_name, vf_id):
+    """Returns RX and TX unicast packet counts for a VF as a tuple."""
+    try:
+        output = subprocess.check_output(
+            ["esxcli", "network", "sriovnic", "vf", "stats", "-n", nic_name, "-v", str(vf_id)],
+            text=True
+        )
+        rx_match = re.search(r"Rx Unicast Pkt:\s+(\d+)", output)
+        tx_match = re.search(r"Tx Unicast Pkt:\s+(\d+)", output)
+        rx = int(rx_match.group(1)) if rx_match else 0
+        tx = int(tx_match.group(1)) if tx_match else 0
+        return rx, tx
+    except subprocess.CalledProcessError:
+        return 0, 0
+
+
 def main_start_generator(
         cmd: argparse.Namespace
 ) -> None:
@@ -1731,10 +2158,16 @@ def main_start_generator(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     expid = hashlib.md5(f"{cmd.profile}_{timestamp}".encode()).hexdigest()[:8]
     base_output_dir = os.path.join("results", f"{expid}")
-
     logger.info(f"📁 Results will be saved in: {base_output_dir}")
 
     generate_sampling_lua_script()
+
+    esxi_map = pod_to_esxi_host_mapping()
+    if not esxi_map:
+        raise RuntimeError("❌ No ESXi mapping found. Check node labels or node selector.")
+
+    vf_monitor_threads = start_esxi_collector(
+        tx_nodes, rx_nodes, esxi_map, cmd, base_output_dir)
 
     if not cmd.skip_copy:
         copy_flows_to_pods(tx_pods, rx_pods)
@@ -1746,6 +2179,8 @@ def main_start_generator(
         rx_core_list = start_dpdk_testpmd(rx_pods, rx_numa, tx_macs, cmd)
     else:
         logger.info("⏭️  Skipping testpmd launch on RX pods (--skip-testpmd)")
+
+    cmdlines = collect_cmdline_from_nodes(tx_pods + rx_pods, tx_nodes + rx_nodes, base_output_dir)
 
     move_pktgen_profiles(tx_pods)
     tx_core_list = start_pktgen_on_tx_pods(tx_pods, tx_numa, cmd)
@@ -1760,20 +2195,28 @@ def main_start_generator(
     if len(tx_core_list) != len(tx_pods):
         logger.info(f"⚠️  Warning: Only {len(tx_core_list)} "
                     f"TX pods successfully launched pktgen out of {len(tx_pods)}")
+
     if len(rx_core_list) != len(rx_pods):
         logger.info(f"⚠️  Warning: Only {len(rx_core_list)} "
                     f"RX pods successfully launched testpmd out of {len(rx_pods)}")
 
     for i, (tx_pod, rx_pod) in enumerate(zip(tx_pods, rx_pods)):
+
         # // trade block or sub-process
         # // we can serialize pktgen output to rest like interface
-        # //
+
         tx_main, tx_cores, tx_all = tx_core_list[i]
         rx_main, rx_cores, rx_all = rx_core_list[i]
 
         pair_dir = os.path.join(base_output_dir, f"{tx_pod}-{rx_pod}", args.profile.split(".")[0])
         logger.info(f"📁 Results will be saved in: {pair_dir}")
         os.makedirs(pair_dir, exist_ok=True)
+
+        tx_esxi = esxi_map.get(tx_nodes[i])
+        rx_esxi = esxi_map.get(rx_nodes[i])
+
+        tx_cmdline = cmdlines.get(tx_nodes[i])
+        rx_cmdline = cmdlines.get(rx_nodes[i])
 
         write_pair_metadata(
             path=pair_dir,
@@ -1787,7 +2230,12 @@ def main_start_generator(
             rx_node=rx_nodes[i],
             expid=expid,
             timestamp=timestamp,
-            cmd=cmd
+            cmd=cmd,
+            tx_esxi=tx_esxi,
+            rx_esxi=rx_esxi,
+            tx_cmdline=tx_cmdline,
+            rx_cmdline=rx_cmdline
+
         )
 
         collect_and_parse_tx_stats(
@@ -1813,11 +2261,23 @@ def main_start_generator(
         if cmd.debug:
             debug_dump_npz_results(pair_dir)
 
+    for t in vf_monitor_threads:
+        t.join()
+
+    logger.info("✅ VF sampling threads completed.")
     logger.info("📁 All results saved in 'results/' directory.")
 
+    session_name = f"pktgen_{cmd.profile.split('.')[0]}"
+    try:
+        kill_tmux_session(session_name)
+        logger.info(f"🧹 Cleaned up tmux session: {session_name}")
+    except Exception as e:
+        logger.error(f"❌ Failed to kill tmux session: {e}")
 
-def parse_int_list(csv: str) -> List[int]:
-    return [int(v.strip()) for v in csv.split(",") if v.strip()]
+
+def parse_int_list(csv_str: str) -> List[int]:
+    """Parse command  seperated list of values , note this for arg parser no spaces. """
+    return [int(v.strip()) for v in csv_str.split(",") if v.strip()]
 
 
 def render_converge_lua_profile(
@@ -2045,13 +2505,17 @@ def setup_logging(
         log_level: str,
         log_output: str = "console",
         log_file: str = "benchmark.log"
-):
-    """
+) -> None:
+    """Setup logging facility.
 
-    :param log_level:
-    :param log_output:
-    :param log_file:
-    :return:
+    :param log_level: Logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR").
+                      If invalid or not recognized, defaults to "INFO".
+    :param log_output: Where to send the logs. Options:
+                          - "console": output logs to standard output.
+                          - "file": write logs to the specified file.
+                          - "both": output to both console and file.
+    :param log_file: File path to write logs if `log_output` includes "file" or "both".
+    :return: Npme
     """
     handlers = []
 
@@ -2077,10 +2541,11 @@ def setup_logging(
 
 
 def clean_up(cmd: argparse.Namespace):
-    """This routine cleanup on interrupts  (KeyboardInterrupt) etc
+    """This routine cleanup on interrupts  (KeyboardInterrupt) etc.
      - Kill tmux session
     - Stop testpmd on RX pods
     - Kill pktgen in TX pods
+
     :param cmd:
     :return:
     """
@@ -2090,8 +2555,8 @@ def clean_up(cmd: argparse.Namespace):
     try:
         stop_testpmd_on_rx_pods(rx_pods)
         logger.info("🧼 Stopped testpmd on all RX pods")
-    except Exception as e:
-        logger.error(f"❌ Failed to stop testpmd: {e}")
+    except Exception as err:
+        logger.error(f"❌ Failed to stop testpmd: {err}")
 
     try:
         for pod in tx_pods:
@@ -2102,7 +2567,7 @@ def clean_up(cmd: argparse.Namespace):
             )
         logger.info("🧯 Force-killed pktgen in TX pods")
 
-        # delete stale files inside each tx pod
+        # we delete all stale files inside each tx pod
         for pod in tx_pods:
             subprocess.run(
                 ["kubectl", "exec", pod, "--", "rm", "-f", "/tmp/*.csv", "/sample_pktgen.lua"],
@@ -2111,21 +2576,19 @@ def clean_up(cmd: argparse.Namespace):
             )
         logger.info("🗑️  Removed temporary CSV and Lua files from TX pods")
 
-
-    except Exception as e:
-        logger.error(f"❌ Failed to kill pktgen in TX pods: {e}")
+    except Exception as err:
+        logger.error(f"❌ Failed to kill pktgen in TX pods: {err}")
 
     logger.warning("🧹 Starting cleanup...")
-    session = f"pktgen_{cmd.profile.split('.')[0]}"
+    session_ = f"pktgen_{cmd.profile.split('.')[0]}"
     try:
-        kill_tmux_session(session)
-        logger.info(f"🧹 Killed tmux session: {session}")
-    except Exception as e:
-        logger.error(f"❌ Failed to kill tmux session: {e}")
+        kill_tmux_session(session_)
+        logger.info(f"🧹 Killed tmux session: {session_}")
+    except Exception as err:
+        logger.error(f"❌ Failed to kill tmux session: {err}")
 
 
 if __name__ == '__main__':
-
 
     if not shutil.which("kubectl"):
         raise RuntimeError("❌ 'kubectl' is not found in PATH. Please install or configure it properly.")
@@ -2154,6 +2617,11 @@ if __name__ == '__main__':
         formatter_class=argparse.RawTextHelpFormatter
     )
 
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="🔍 Debug: Load and display contents of .npz results after test"
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
     gen = subparsers.add_parser("generate_flow", help="🛠 Generate Pktgen Lua flows")
     gen.add_argument("--base-src-ip", default="192.168.1.1", help="Base source IP")
@@ -2180,6 +2648,25 @@ if __name__ == '__main__':
             "  spd  - Source IP + Port + Destination IP\n"
             "  sdpd - Source IP + Port, Destination IP + Port"
         )
+    )
+
+    gen.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
+
+    gen.add_argument(
+        "--log-output",
+        choices=["console", "file", "both"],
+        default="console",
+        help="Where to log: 'console', 'file', or 'both' (default: console)"
+    )
+    gen.add_argument(
+        "--log-file",
+        default="benchmark.log",
+        help="Log file name if using file or both (default: benchmark.log)"
     )
 
     start = subparsers.add_parser("start_generator", help="🚀 Start pktgen & testpmd using selected profile")
@@ -2242,10 +2729,6 @@ if __name__ == '__main__':
     )
 
     start.add_argument(
-        "--debug", action="store_true",
-        help="🔍 Debug: Load and display contents of .npz results after test"
-    )
-    start.add_argument(
         "--skip-copy", action="store_true",
         help="⏭️  Skip copying Lua profiles and Pktgen.lua into TX pods"
     )
@@ -2256,6 +2739,11 @@ if __name__ == '__main__':
     start.add_argument(
         "--duration", type=int, default=60,
         help="⏱ Duration in seconds to run pktgen before stopping testpmd"
+    )
+
+    start.add_argument(
+        "--nic-name", type=str, default="vmnic3",
+        help="🖧 NIC name on ESXi host to monitor VF stats (default: vmnic3)"
     )
 
     # Discover available profiles
@@ -2277,9 +2765,14 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    log_level = getattr(args, "log_level", "INFO")
-    log_output = getattr(args, "log_output", "console")
-    log_file = getattr(args, "log_file", "benchmark.log")
+    if getattr(args, "debug", False):
+        setup_logging("DEBUG", getattr(args, "log_output", "console"), getattr(args, "log_file", "benchmark.log"))
+        logger.debug("🧪 Debug mode enabled")
+        logger.debug(f"Parsed arguments: {vars(args)}")
+    else:
+        setup_logging(getattr(args, "log_level", "INFO"),
+                      getattr(args, "log_output", "console"),
+                      getattr(args, "log_file", "benchmark.log"))
 
     setup_logging(args.log_level, args.log_output, args.log_file)
 
@@ -2317,8 +2810,8 @@ if __name__ == '__main__':
                 session = f"pktgen_{args.profile.split('.')[0]}"
                 kill_tmux_session(session)
                 logger.info(f"🧹 Killed tmux session: {session}")
-            except Exception as e:
-                logger.error(f"❌ Failed to kill tmux session: {e}")
+            except Exception as e_:
+                logger.error(f"❌ Failed to kill tmux session: {e_}")
 
     elif args.command == "upload_wandb":
         upload_npz_to_wandb(result_dir=args.result_dir, expid=args.expid)
