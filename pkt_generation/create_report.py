@@ -990,13 +990,12 @@ def create_report(
     """
     experiments = discover_experiments()
     matching_tx_files = [tx for eid, tx in experiments if eid == exp_id]
-    print("MATCHED")
-    print(matching_tx_files)
 
     def tx_sort_key(tx_file):
         meta = extract_metadata(os.path.basename(tx_file), full_path=tx_file)
         print(
-            f"🧩 Sorting key for {os.path.basename(tx_file)} → size={meta.get('pkt_size')}, flows={meta.get('num_flows')}, rate={meta.get('percent_rate')}")
+            f"🧩 Sorting key for {os.path.basename(tx_file)} → size={meta.get('pkt_size')}, "
+            f"flows={meta.get('num_flows')}, rate={meta.get('percent_rate')}")
         try:
             return (
                 int(meta.get("pkt_size", 0)),
