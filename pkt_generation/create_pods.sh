@@ -1,5 +1,7 @@
 #!/bin/bash
 #
+# DPDK Packet Generator Kubernetes Benchmark
+
 # This script creates multiple pairs of "tx" and "rx" pods.
 
 # It can create N where N is 1, 2, 3.. N act as TX POD i.e transmit in unidirectional sense.
@@ -68,6 +70,14 @@ PCI_ADDRESSES=(
     "03:05.0" # Port 5
 )
 
+if [ "${#MAC_ADDRESSES[@]}" -ne "${#PCI_ADDRESSES[@]}" ]; then
+  echo "❌ Number of MAC addresses and PCI addresses must match."
+  echo "   ➤ MACs: ${#MAC_ADDRESSES[@]}"
+  echo "   ➤ PCI:  ${#PCI_ADDRESSES[@]}"
+  exit 1
+fi
+
+
 
 DEFAULT_NUM_PAIRS=1
 DEFAULT_CPU=2           # CPU cores
@@ -87,9 +97,8 @@ DEFAULT_POD_KUBECONFIG_PATH="/home/capv/.kube"
 DPDK_RESOURCE_NAME="intel.com/dpdk"
 SRIOV_RESOURCE_NAME="intel.com/sriov"
 
-OPT_SAME_NODE="true"
+OPT_SAME_NODE="false"
 OPT_DRY_RUN="false"
-SHOW_HELP=false
 USER_SET_HUGEPAGES="false"
 
 if ! command -v kubectl >/dev/null 2>&1; then
@@ -105,10 +114,14 @@ fi
 if [ ! -f ".yamllint" ]; then
   echo "⚙️  Generating default .yamllint config..."
   cat <<EOF > .yamllint
+extends: default
 rules:
   line-length:
     max: 120
     level: warning
+  document-start: disable
+  indentation:
+    spaces: 2
 EOF
 fi
 
@@ -135,6 +148,11 @@ if [ ! -f "$KUBECONFIG_FILE" ]; then
 fi
 
 export KUBECONFIG="$KUBECONFIG_FILE"
+
+if ! kubectl cluster-info >/dev/null 2>&1; then
+    echo "❌ Unable to connect to Kubernetes cluster. Check your kubeconfig and cluster status."
+    exit 1
+fi
 
 
 # ---------------------------
@@ -277,10 +295,28 @@ else
 fi
 
 
-echo "Creating target dir"
-# Create a directory to store the generated Pod YAML files
-mkdir -p pods
+# Clean up existing tx* or rx* pods
+PODS=$(kubectl get pods -o=name | grep -E 'tx|rx' || true)
+if [ -n "$PODS" ]; then
+  echo "Deleting matching pods: $PODS"
+  echo "$PODS" | xargs kubectl delete --ignore-not-found
+else
+  echo "No pods match tx or rx."
+fi
 
+# Clean up matching PVCs
+PVC_NAMES=$(kubectl get pvc -o=name | grep -E 'output-pvc-.*' || true)
+if [ -n "$PVC_NAMES" ]; then
+  echo "Deleting matching PVCs: $PVC_NAMES"
+  echo "$PVC_NAMES" | xargs kubectl delete --ignore-not-found
+else
+  echo "No PVCs found for tx or rx pods."
+fi
+
+# ✅ Clean up and recreate pods folder
+echo "🧹 Cleaning up 'pods/' folder..."
+rm -rf pods
+mkdir -p pods
 
 function validate_network_resource() {
     local resource_name="$1"
@@ -366,42 +402,39 @@ if [ "$OPT_SAME_NODE" = "false" ]; then
     fi
 fi
 
+#
+#if [ "$OPT_SAME_NODE" = "true" ]; then
+#    node=$(kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' --no-headers | awk 'NR==1{print $1}')
+#    tx_node="$node"
+#    rx_node="$node"
+#else
+#    # Rotate nodes for tx/rx placement
+#    tx_node="${nodes[$((i % ${#nodes[@]}))]}"
+#    rx_node="${nodes[$(((i + 1) % ${#nodes[@]}))]}"
+#fi
 
-if [ "$OPT_SAME_NODE" = "true" ]; then
-    echo "Deploying all pods on the same node."
-    node=$(kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' --no-headers | awk 'NR==1{print $1}')
-    tx_node="$node"
-    rx_node="$node"
-else
-    tx_node=${nodes[0]}
-    rx_node=${nodes[1]}
-fi
 
-if [ "$NETWORK_RESOURCE_TYPE" = "dpdk" ]; then
-    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$tx_node"
-    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$rx_node"
-elif [ "$NETWORK_RESOURCE_TYPE" = "sriov" ]; then
-    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$tx_node"
-    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$rx_node"
-else
-    echo "Error: Unsupported resource type '$NETWORK_RESOURCE_TYPE'. Supported types are: dpdk, sriov"
-    exit 1
-fi
-
-echo "Tx node: $tx_node"
-echo "Rx node: $rx_node"
-echo "-------------------------------------------------------"
-
-if [ "$tx_node" = "$rx_node" ]; then
-    echo "🔁 Topology Mode: Single Worker Node (TX and RX on same node)"
-else
-    echo "🔀 Topology Mode: Multi-Worker Node (TX and RX on different nodes)"
-fi
+#if [ "$NETWORK_RESOURCE_TYPE" = "dpdk" ]; then
+#    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$tx_node"
+#    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$rx_node"
+#elif [ "$NETWORK_RESOURCE_TYPE" = "sriov" ]; then
+#    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$tx_node"
+#    validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$rx_node"
+#else
+#    echo "Error: Unsupported resource type '$NETWORK_RESOURCE_TYPE'. Supported types are: dpdk, sriov"
+#    exit 1
+#fi
+#
+#echo "Tx node: $tx_node"
+#echo "Rx node: $rx_node"
+#echo "-------------------------------------------------------"
 
 # a check if num pairs > then what we have in CaaS
 MAX_PAIRS=$((${#MAC_ADDRESSES[@]} / 2))
 if [ "$DEFAULT_NUM_PAIRS" -gt "$MAX_PAIRS" ]; then
-    echo "❌ Error: Only $MAX_PAIRS pairs supported with current MAC/PCI definitions."
+      echo "   ➤ You requested: $DEFAULT_NUM_PAIRS pairs"
+      echo "   ➤ You provided:  ${#MAC_ADDRESSES[@]} MACs and ${#PCI_ADDRESSES[@]} PCI addresses"
+      echo "   💡 Hint: Add ${DEFAULT_NUM_PAIRS}*2 MAC and PCI entries to support $DEFAULT_NUM_PAIRS pairs"
     exit 1
 fi
 
@@ -448,7 +481,41 @@ else
     fi
 fi
 
+if [ "$OPT_SAME_NODE" = "true" ]; then
+    echo "🔁 Topology Mode: Single Worker Node (TX and RX on same node)"
+else
+    echo "🔀 Topology Mode: Multi-Worker Node (TX and RX on different nodes)"
+    echo "   🧠 Nodes used: ${nodes[*]}"
+fi
+
 for i in $(seq 0 $((DEFAULT_NUM_PAIRS - 1))); do
+
+    if [ "$OPT_SAME_NODE" = "true" ]; then
+        node=$(kubectl get nodes --selector='!node-role.kubernetes.io/control-plane' --no-headers | awk 'NR==1{print $1}')
+        tx_node="$node"
+        rx_node="$node"
+    else
+        tx_node="${nodes[$((2 * i % ${#nodes[@]}))]}"
+        rx_node="${nodes[$(((2 * i + 1) % ${#nodes[@]}))]}"
+    fi
+
+    if [ "$tx_node" = "$rx_node" ]; then
+        echo "🔁 Topology Mode: Single Worker Node (TX and RX on same node)"
+    else
+        echo "🔀 Topology Mode: Multi-Worker Node (TX and RX on different nodes)"
+    fi
+
+
+    if [ "$NETWORK_RESOURCE_TYPE" = "dpdk" ]; then
+        validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$tx_node"
+        validate_network_resource "$NETWORK_RESOURCE_TYPE" "$DPDK_REQUEST" "$rx_node"
+    elif [ "$NETWORK_RESOURCE_TYPE" = "sriov" ]; then
+        validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$tx_node"
+        validate_network_resource "$NETWORK_RESOURCE_TYPE" "$KERNEL_REQUEST" "$rx_node"
+    else
+        echo "Error: Unsupported resource type '$NETWORK_RESOURCE_TYPE'. Supported types are: dpdk, sriov"
+        exit 1
+    fi
 
     tx_name="tx$i"
     rx_name="rx$i"
@@ -510,8 +577,9 @@ for i in $(seq 0 $((DEFAULT_NUM_PAIRS - 1))); do
 
     if [ "$OPT_DRY_RUN" = "false" ]; then
         echo "🚀 Applying $tx_name and $rx_name to the cluster..."
-        kubectl apply -f "pods/pod-$tx_name.yaml"
-        kubectl apply -f "pods/pod-$rx_name.yaml"
+        kubectl apply -f "pods/pod-$tx_name.yaml" &
+        kubectl apply -f "pods/pod-$rx_name.yaml" &
+        wait
         echo "✅ Successfully applied $tx_name and $rx_name"
     else
       echo "📝 [DRY-RUN] Skipping apply for $tx_name and $rx_name."
@@ -521,6 +589,7 @@ done
 echo "-------------------------------------------------------"
 
 if [ "$OPT_DRY_RUN" = "true" ]; then
+
     echo "🧪 Validating generated YAMLs..."
     for file in pods/pod-*.yaml; do
         if kubectl apply --dry-run=client -f "$file" >/dev/null 2>&1; then
@@ -530,9 +599,19 @@ if [ "$OPT_DRY_RUN" = "true" ]; then
         fi
     done
 
+    # Optional YAML linting pass
+    if command -v yamllint >/dev/null 2>&1; then
+        echo "🧪 Running yamllint on generated YAMLs..."
+        for file in pods/pod-*.yaml; do
+            echo "📄 Linting $file"
+            yamllint "$file" || echo "⚠️  Lint warning(s) in $file"
+        done
+    else
+        echo "⚠️  'yamllint' not installed. Skipping YAML linting."
+    fi
+
     echo "Dry-run mode: no pods were actually created."
     echo "Check 'pods/' folder to see the rendered YAML."
 else
     echo "✅ Done! Created $DEFAULT_NUM_PAIRS pairs of tx–rx pods."
 fi
-
