@@ -3,12 +3,13 @@
 This script is designed to automate the process of generating and running packet generation and 
 reception tests in a Kubernetes environment using DPDK (Data Plane Development Kit). 
 
-The system supports multiple configurations. As described in the Topology section, it allows you to run either a single 
-or multiple pairs of TX and RX pods, either on the same node or spread across different nodes.
+The system supports multiple configurations. As described in the Topology section, it allows you to 
+run either a single or multiple pairs of TX and RX pods, either on the same node or spread 
+across different nodes.
 
 Additionally, the system enables the allocation of a subset of cores for the tests.
-Please note that the minimum configuration per TX or RX pod is 2 cores. DPDK requires at least one core 
-to be allocated as the master core for proper operation.
+Please note that the minimum configuration per TX or RX pod is 2 cores. DPDK 
+requires at least one core to be allocated as the master core for proper operation.
 
 The system enables the creation of Lua flow profiles for Pktgen, manages packet generation traffic, 
 collects performance statistics, and saves the results for further analysis.
@@ -19,7 +20,8 @@ Key Features:
 - Kubernetes Integration: Manages pods for packet generation (TX) and reception (RX) within a Kubernetes cluster.
 - DPDK & Pktgen Support: Utilizes DPDK for high-performance packet processing and Pktgen for traffic generation.
 - Stats Collection: Gathers detailed performance statistics like packet rate, byte count, and errors.
-- Results Logging: Logs the collected statistics into .npz files for post-test analysis, and optionally uploads the results to Weights & Biases (W&B) for visualization.
+- Results Logging: Logs the collected statistics into .npz files for post-test analysis, and optionally uploads the 
+- results to Weights & Biases (W&B) for visualization.
 
 ## Prerequisites
 
@@ -197,7 +199,7 @@ This guide helps you set up the necessary pods for running DPDK tests in a Kuber
 The provided script allows you to create multiple tx and rx pod pairs, either on the same node or on 
 different nodes within the cluster.
 
-Prerequisites
+## Prerequisites
 
 Before running the script, ensure the following:
 
@@ -208,6 +210,59 @@ Before running the script, ensure the following:
 -- Pod Template: The pod-template.yaml file should be available in the same directory as this script. This file is used as a template for generating the individual tx and rx pods.
 
 Container Image: Ensure the required container image is available in your registry. You can use the default image or specify your custom image with the -i option.
+
+## System Requirements
+
+- Minimum CPU: 4 cores per node
+- Minimum RAM: 16 GiB per node
+- NIC: Intel X710/XL710/XXV710 or similar with SR-IOV and DPDK support
+- Hugepage: At least 2Gi of 1Gi hugepages configured and mounted
+
+```text
+dpdk-k8s-bench/
+├── create_pods.sh
+├── run_experiments.sh
+├── packet_generator.py
+├── pod-template.yaml
+├── flows/
+├── results/
+├── logs/
+└── README.md
+
+```
+
+```text
+results/
+└── <exp_id>/
+    ├── tx0-rx0/
+    │   ├── <metadata>.npz
+    │   ├── tx0_port_stats.csv
+    │   ├── tx0_port_rate_stats.csv
+    │   ├── rx0_stats.log
+    │   └── rx0_warmup.log
+```
+
+### 📦 Results Directory Layout
+
+Each experiment creates a unique ID folder inside `results/`. Within that folder, each TX/RX pod pair has its own subdirectory:
+
+
+### 🧪 File Descriptions
+
+- **`<metadata>.npz`**  
+  A compressed NumPy archive that contains summary metrics and metadata for the test. It includes TX/RX packet rates, byte counts, and error statistics.
+
+- **`tx0_port_stats.csv` / `tx1_port_stats.csv`**  
+  Interface-level statistics from the TX side collected before and after the test. Includes total packets, bytes, and errors.
+
+- **`tx0_port_rate_stats.csv` / `tx1_port_rate_stats.csv`**  
+  TX-side per-sample packet rates recorded during the test. Useful for plotting real-time graphs.
+
+- **`rx0_stats.log` / `rx1_stats.log`**  
+  Output logs from `testpmd` running in RX pods. Contains RX packet counters, byte totals, drops, and error messages.
+
+- **`rx0_warmup.log` / `rx1_warmup.log`**  
+  Logs from the warmup phase before traffic generation. This is used to ensure MAC learning has taken place, especially in setups with L2 switching.
 
 ### Quick Start
 
@@ -234,6 +289,7 @@ Options:
 --dry-run: Generate YAML files without applying them to the cluster (useful for inspection).
 ```
 
+
 ### Verify the Created Pods
 
 Once the script has run, you can check the created pods using the following commands:
@@ -243,6 +299,64 @@ Each pod is assigned one of two roles: either TX (transmit) or RX (receive).
 ```bash
 kubectl get pods -l role=tx
 kubectl get pods -l role=rx
+```
+
+### 🔧 `create_pods.sh` — Pod Creation Script
+
+This script is responsible for generating and deploying the Kubernetes pod specifications for 
+both **TX (transmit)** and **RX (receive)** roles.
+
+#### 📋 Responsibilities
+
+- Reads and fills in a pod template (`pod-template.yaml`) with runtime values such as:
+  - Pod name, node name
+  - MAC and PCI mappings
+  - CPU, memory, hugepages, NIC resources
+- Supports **dry-run mode** (`--dry-run`) to validate pod specs without applying them.
+- Assigns **pod affinity rules** to control whether pods are placed on the same or different nodes.
+- Deploys **Persistent Volume Claims (PVC)** (e.g., `output-pvc`) if configured.
+- Creates and labels pods with `role=tx` or `role=rx` for identification and selection.
+
+#### 🛠️ Example Usage
+
+```bash
+# Create 2 TX/RX pairs on different nodes
+./create_pods.sh -n 2 -c 4 -m 8 -d 2 -g 2 --no-same-node
+
+# Dry-run to preview generated YAML without applying
+./create_pods.sh -n 2 -c 4 -m 8 -g 2 --dry-run
+
+# Use a custom image for pod deployment
+./create_pods.sh -n 2 -i my-registry/my-image:latest
+```
+### 🚀 `run_experiments.sh` — Experiment Orchestration Script
+
+This is the main entrypoint to run DPDK-based tests.
+
+#### 📋 Responsibilities
+
+- Validates system state and configuration.
+- Automatically regenerates Lua profiles if needed.
+- Ensures correct pod-node placement (same or different node).
+- Checks for already completed tests and skips them.
+- Backs up existing results.
+- Runs the test for each matched TX/RX pod pair using a selected Lua profile.
+
+#### ✨ Key Features
+
+- Supports profile filtering (`-f 64` to run only profiles containing "64").
+- Supports **dry-run** mode by default (validates everything without execution).
+- Auto-scans the `results/` directory for existing `.npz` files to avoid duplicate runs.
+- Optionally saves or prints the current configuration (`--config`, `--config-file`).
+
+#### 🛠️ Usage Example
+
+```bash
+# Dry run (default behavior)
+./run_experiments.sh -n 2 --dry-run
+
+# Run real experiments across different nodes
+./run_experiments.sh -n 2 --run --no-same-node
 ```
 
 ## Example Commands
@@ -469,7 +583,6 @@ NUMA topology, and corresponding DPDK interfaces, along with their MAC addresses
 
 ```bash
 python packet_generator.py generate_flow --rate 10,50,100 --pkt-size 64,512,1500 --flows 1,100
-
 ```
 For each pair of TX and RX pods, profiles are generated and saved under each corresponding pair’s directory.
 
@@ -522,6 +635,36 @@ require profiles.
 if we run , we can see that all profile post generation automatically discovered and we can consume any.
 for packet generation.
 
+## 🧩 Detailed Argument Descriptions
+
+
+This script orchestrates full test runs. It auto-detects TX/RX pod pairs, manages Lua profiles,
+avoids duplicate runs, and can resume from incomplete states.
+
+| Argument               | Description                                                                                      |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| `-n <num_pairs>`       | Number of TX/RX pod pairs to match. Defaults to all discovered pairs.                            |
+| `--run`                | Run the experiments (otherwise defaults to dry-run/validation mode).                             |
+| `--dry-run`            | Performs validation (pod presence, profiles, config) but does not run tests.                     |
+| `--config`             | Prints current experiment configuration to terminal (useful for review/debug).                   |
+| `--config-file <path>` | Saves the current test configuration to a file. Useful for logging or reuse.                     |
+| `--no-same-node`       | Ensures TX and RX pods are deployed on different nodes. Default behavior places them apart.      |
+| `-f <pattern>`         | Filters Lua profiles to run only those that match a pattern (e.g. `64`, `9000B`).                |
+| `--scan-results`       | Lists which profiles have already completed and which are pending.                               |
+
+---
+
+### ✅ Resume Feature
+
+This script **automatically resumes** from the last incomplete state by scanning:
+
+- The `results/` directory  
+- `.npz` files for integrity  
+- Lua profile list to identify which tests are pending  
+
+> 🧠 **Note**: No need to delete or move anything. If a profile already has a valid `.npz`, the script will **skip it** automatically.
+
+
 ```bash
 python packet_generator.py start_generator --help
 ```
@@ -571,7 +714,54 @@ options:
                         profile_1_flows_pkt_size_2000B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_512B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_512B_10_rate_s.lua 🔹
                         profile_1_flows_pkt_size_64B_100_rate_s.lua 🔹 profile_1_flows_pkt_size_64B_10_rate_s.lua 🔹 profile_1_flows_pkt_size_9000B_100_rate_s.lua 🔹
 ```
+
  
+## 🧮 How Socket Memory Is Calculated
+
+DPDK requires memory to be allocated per NUMA socket in units called *socket memory*. This is essential for allocating hugepage-backed memory buffers that are used by DPDK for zero-copy packet processing.
+
+### 🔢 Why 2048MB Is the Default
+
+We use `2048` MB (2GiB) as the **default socket memory per pod** because:
+
+- It's the **minimum safe amount** to support a small number of queues and descriptors.
+- It ensures that Pktgen and TestPMD can **initialize without memory allocation failures**.
+- It aligns with common **hugepage allocations** (e.g., 2 x 1GiB hugepages).
+- It provides headroom for:
+  - Packet buffers (`mbufs`)
+  - Descriptor rings
+  - Metadata structures
+
+### 📐 How Total Socket Memory Is Calculated
+
+When using the `--tx-socket-mem` and `--rx-socket-mem` flags, the script multiplies the provided 
+amount by the number of pods:
+
+```text
+Total TX socket memory = TX_POD_COUNT × TX_SOCKET_MEM_MB
+Total RX socket memory = RX_POD_COUNT × RX_SOCKET_MEM_MB
+```
+
+```bash
+python packet_generator.py start_generator --tx-socket-mem 4096 --rx-socket-mem 4096
+```
+If you have 3 TX and 3 RX pods on the same node, total memory required would be:
+
+```text
+TX: 3 × 4096MB = 12GiB
+RX: 3 × 4096MB = 12GiB
+Total = 24GiB of hugepage memory
+```
+
+Make sure your nodes have enough hugepages available (/proc/meminfo, mount, kubectl describe node) before assigning high values.
+⚠️ Note: If hugepages are insufficient, DPDK apps may fail silently or throw ENOMEM errors during init.
+
+
+#### 💡 Tip
+If you assign more cores, queues, or larger packet buffers, increase socket memory accordingly. 
+For large-scale tests or jumbo frames, 4GiB–8GiB per pod is common.
+
+
 ## Topologies
 
 The system supports different topologies, with traffic always being unidirectional. For instance, you can create a 
