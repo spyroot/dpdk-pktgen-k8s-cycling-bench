@@ -99,6 +99,7 @@ Autor mus
 
 """
 import argparse
+import glob
 import hashlib
 import json
 import logging
@@ -113,6 +114,7 @@ import time
 from datetime import datetime
 from ipaddress import ip_address
 from itertools import product
+from shlex import shlex
 from typing import List, Optional, Union
 from typing import Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor
@@ -120,12 +122,65 @@ import csv
 
 import numpy as np
 import wandb
+import shlex
 
-# logging.basicConfig(
-#     filename='pktgen.log',
-#     level=logging.INFO,
-#     format='%(asctime)s - %(levelname)s - %(message)s'
-# )
+import paramiko
+from threading import Lock
+
+
+class SSHConnectionManager:
+    def __init__(self, username: str, password: str):
+
+        self.username = username
+        self.password = password
+        self.connections = {}
+        self.lock = Lock()
+        self.closed = False
+
+    def get_connection(
+            self, host: str
+    ) -> paramiko.SSHClient:
+        """
+
+        :param host:
+        :return:
+        """
+        with self.lock:
+            client = self.connections.get(host)
+            if client:
+                transport = client.get_transport()
+                if transport and transport.is_active():
+                    return client
+                else:
+                    # 🔄 reconnect if transport dead
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    del self.connections[host]
+
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(hostname=host, username=self.username, password=self.password,
+                           look_for_keys=False, allow_agent=False)
+            client.get_transport().set_keepalive(30)
+            self.connections[host] = client
+            return client
+
+    def close_all(self):
+        with self.lock:
+            for client in self.connections.values():
+                client.close()
+            self.connections.clear()
+            self.closed = True
+            print("🧹 SSH connections closed.")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close_all()
+
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +260,89 @@ function main()
 end
 
 main();
+"""
+
+LUA_UDP_LATENCY_TEMPLATE = """\
+package.path = package.path ..";?.lua;test/?.lua;app/?.lua;"
+require "Pktgen"
+
+local pkt_sizes = {{pkt_sizes}};
+local duration = {duration};
+local confirmDuration = {confirm_duration};
+local pauseTime = {pause_time};
+
+local sendport = "0";
+local recvport = "1";
+
+local dstip = "{dst_ip}";
+local srcip = "{src_ip}";
+local netmask = "{netmask}";
+local initialRate = {initial_rate};
+
+local function setup(rate, pktsize)
+    pktgen.dst_mac("0", "start", "{dst_mac_port0}")
+    pktgen.src_mac("0", "start", "{src_mac_port0}")
+
+    pktgen.dst_mac("1", "start", "{dst_mac_port1}")
+    pktgen.src_mac("1", "start", "{src_mac_port1}")
+
+    pktgen.set_ipaddr(sendport, "dst", dstip)
+    pktgen.set_ipaddr(sendport, "src", srcip..netmask)
+
+    pktgen.set_ipaddr(recvport, "dst", srcip)
+    pktgen.set_ipaddr(recvport, "src", dstip..netmask)
+
+    pktgen.set_proto(sendport..","..recvport, "udp")
+
+    pktgen.set(sendport, "count", 0)
+    pktgen.set(sendport, "rate", rate)
+    pktgen.set(sendport, "size", pktsize)
+
+    pktgen.latency(sendport, "enable")
+    pktgen.latency(sendport, "rate", 1000)
+    pktgen.latency(sendport, "entropy", 12)
+
+    pktgen.latency(recvport, "enable")
+    pktgen.latency(recvport, "rate", 10000)
+    pktgen.latency(recvport, "entropy", 8)
+end
+
+local function runTrial(pkt_size, rate, duration, count)
+    pktgen.clr()
+    pktgen.set(sendport, "rate", rate)
+    pktgen.set(sendport, "size", pkt_size)
+
+    pktgen.start(sendport)
+    pktgen.delay(duration)
+    pktgen.stop(sendport)
+
+    pktgen.delay(pauseTime)
+end
+
+local function run(pkt_size)
+    local max_rate = 100
+    local min_rate = 1
+    local trial_rate = initialRate
+    local num_dropped
+
+    for count = 1, 10 do
+        runTrial(pkt_size, trial_rate, duration, count)
+        -- sample externally via socat
+        trial_rate = min_rate + ((max_rate - min_rate) / 2)
+    end
+
+    trial_rate = min_rate
+    runTrial(pkt_size, trial_rate, confirmDuration, 0)
+end
+
+function main()
+    for _, size in ipairs(pkt_sizes) do
+        setup(initialRate, size)
+        run(size)
+    end
+end
+
+main()
 """
 
 # unused for now,
@@ -534,17 +672,47 @@ def get_pci_port_map(
     return pci_to_port
 
 
+def is_testpmd_running(pod_name: str) -> bool:
+    """
+    Check if dpdk-testpmd is currently running inside the given pod.
+
+    :param pod_name: Name of the pod (e.g., 'tx0', 'rx1')
+    :return: True if testpmd is running, False otherwise
+    """
+    check_cmd = f"kubectl exec {pod_name} -- pgrep -f dpdk-testpmd"
+    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+    return result.returncode == 0
+
+
 def get_mac_address(
-        pod_name: str
+        pod_name: str,
+        is_retry: bool = True
 ) -> str:
     """Extract MAC address from dpdk-testpmd inside a pod with env var.
 
     Note we always mask EAL via -a hence TX or RX pod see a single DPDK port.
     All profile use VF's mac address that eliminates -P (promiscuous mode)
 
+    :param is_retry:
     :param pod_name: tx0, tx1, rx0 etc. pod name
     :return: return DPDK interface mac
     """
+
+    if is_retry:
+        max_retries = 3
+        retry_delay = 1
+
+        for attempt in range(1, max_retries + 1):
+            if not is_testpmd_running(pod_name):
+                break
+            print(f"⚠️ testpmd still running in {pod_name}, retrying ({attempt}/{max_retries})...")
+            time.sleep(retry_delay)
+        else:
+            raise RuntimeError(f"❌ testpmd is still running in pod {pod_name} after {max_retries} retries.")
+    else:
+        if is_testpmd_running(pod_name):
+            raise RuntimeError(f"❌ testpmd is already running in pod {pod_name}. Cannot retrieve MAC address.")
+
     check_cmd = f"kubectl exec {pod_name} -- pgrep -f dpdk-testpmd"
     result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
 
@@ -557,6 +725,71 @@ def get_mac_address(
     full_output = result.stdout + result.stderr
     match = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", full_output)
     return match.group(0) if match else None
+
+
+def check_npz_validity(npz_path, min_samples=5):
+    try:
+        data = np.load(npz_path)
+        keys = list(data.keys())
+
+        if not keys:
+            return False, "No data keys found"
+
+        # Check expected keys
+        if "rx_pps" not in keys and "tx_pps" not in keys:
+            return False, "Missing rx_pps/tx_pps"
+
+        # Check length of main series
+        samples = len(data["rx_pps"]) if "rx_pps" in data else len(data["tx_pps"])
+        if samples < min_samples:
+            return False, f"Too few samples ({samples})"
+
+        # Check all-zero condition
+        if np.all(data["rx_pps"] == 0):
+            return False, "rx_pps is all zero"
+
+        return True, f"Valid ({samples} samples)"
+
+    except Exception as e:
+        return False, f"Load error: {str(e)}"
+
+
+def has_profile_run(
+        profile: str
+) -> bool:
+    expected_base = profile.replace(".lua", "")
+    for exp_dir in glob.glob("results/*"):
+        if not os.path.isdir(exp_dir):
+            continue
+        tx_npz = glob.glob(os.path.join(exp_dir, f"*tx*{expected_base}*.npz"))
+        rx_npz = glob.glob(os.path.join(exp_dir, f"*rx*{expected_base}*.npz"))
+        meta = os.path.join(exp_dir, "metadata.txt")
+
+        if tx_npz and rx_npz and os.path.isfile(meta):
+            return True
+    return False
+
+
+def run_ssh_command_persistent(
+        manager: SSHConnectionManager,
+        host: str,
+        command: List[str]
+) -> str:
+    try:
+        ssh_client = manager.get_connection(host)
+        stdin, stdout, stderr = ssh_client.exec_command(" ".join(command))
+        output = stdout.read().decode()
+
+        exit_status = stdout.channel.recv_exit_status()
+        error = stderr.read().decode()
+
+        if exit_status != 0:
+            raise RuntimeError(f"SSH command failed: {command}\nExit code: {exit_status}\nStderr: {error}")
+
+        return output.strip()
+    except Exception as e:
+        print(f"❌ SSH command failed on {host}: {e}")
+        return ""
 
 
 def run_ssh_command(
@@ -572,13 +805,17 @@ def run_ssh_command(
     :param password: SSH password (default is 'VMware1!')
     :return: Output of the command as a string
     """
+    remote_cmd_str = " ".join(shlex.quote(arg) for arg in command)
     ssh_cmd = [
-                  "sshpass", "-p", password,
-                  "ssh", "-o", "StrictHostKeyChecking=no",
-                  f"root@{esxi_host}"
-              ] + command
+        "sshpass", "-p", password,
+        "ssh", "-tt",
+        "-o", "StrictHostKeyChecking=no",
+        f"root@{esxi_host}",
+        remote_cmd_str
+    ]
+
     try:
-        output = subprocess.check_output(ssh_cmd, text=True)
+        output = subprocess.check_output(ssh_cmd, text=True, stderr=subprocess.DEVNULL)
         return output
     except subprocess.CalledProcessError as e:
         print(f"❌ SSH command failed on {esxi_host}: {e}")
@@ -586,6 +823,7 @@ def run_ssh_command(
 
 
 def get_vf_stats(
+        ssh_mgr: SSHConnectionManager,
         esxi_host: str,
         nic_name: str,
         vf_id: int
@@ -593,13 +831,15 @@ def get_vf_stats(
     """
     Retrieves statistics for a specific VF on a NIC from an ESXi host.
 
+    :param ssh_mgr:
     :param esxi_host: IP or hostname of the ESXi host
     :param nic_name: Name of the NIC
     :param vf_id: Virtual Function ID
     :return: Dictionary of stat name → value
     """
     try:
-        output = run_ssh_command(
+        output = run_ssh_command_persistent(
+            ssh_mgr,
             esxi_host,
             ["esxcli", "network", "sriovnic", "vf", "stats", "-n", nic_name, "-v", str(vf_id)],
         )
@@ -617,11 +857,12 @@ def get_vf_stats(
 
 
 def monitor_vf_stats_remote(
+        ssh_mgr: SSHConnectionManager,
         esxi_host: str,
         nic_name: str,
         interval: int,
         duration: int,
-        output_dir: str = "results"
+        output_dir: str = "results",
 ) -> None:
     """
     Monitors VF stats for all active VFs on an ESXi host NIC
@@ -632,6 +873,7 @@ def monitor_vf_stats_remote(
     :param interval: Sampling interval in seconds
     :param duration: Total monitoring duration in seconds
     :param output_dir: Directory to save CSV output
+    :param ssh_mgr:
     """
 
     logger.info(
@@ -647,7 +889,7 @@ def monitor_vf_stats_remote(
     logger.info(f"🚀 Starting VF sampling thread on {esxi_host}:{nic_name} "
                 f"every {interval}s for {duration}s")
 
-    vfs = get_active_vfs(esxi_host, nic_name)
+    vfs = get_active_vfs(ssh_mgr, esxi_host, nic_name)
     if not vfs:
         logger.warning(f"⚠️ No active VFs found on {esxi_host} for {nic_name}")
         return
@@ -662,7 +904,7 @@ def monitor_vf_stats_remote(
         while time.time() - start_time < duration:
             timestamp = datetime.utcnow().isoformat()
             for vf in vfs:
-                stats = get_vf_stats(esxi_host, nic_name, vf)
+                stats = get_vf_stats(ssh_mgr, esxi_host, nic_name, vf)
                 if stats:
                     stats["timestamp"] = timestamp
                     stats["vf_id"] = vf
@@ -721,6 +963,7 @@ def collect_cmdline_from_nodes(
 
 
 def start_esxi_collector(
+        ssh_mgr: SSHConnectionManager,
         tx_nodes: List[str],
         rx_nodes: List[str],
         esxi_map: Dict[str, str],
@@ -738,6 +981,7 @@ def start_esxi_collector(
 
     ⚠If any node is missing the ESXi host label, that node is skipped with a warning.
 
+    :param ssh_mgr:
     :param tx_nodes: List of TX node names (e.g., ['worker-1'])
     :param rx_nodes: List of RX node names (e.g., ['worker-2'])
     :param esxi_map: Dictionary mapping node name → ESXi hostname/IP from K8s node label
@@ -774,28 +1018,30 @@ def start_esxi_collector(
     for (host, path), nic in esxi_nic_map.items():
         logger.info(f"  • {host} → {nic} → {path}")
 
-    vf_monitor_threads = []
+    monitor_threads = []
+
     for (esxi_host, output_dir), nic_name in esxi_nic_map.items():
         logger.info(f"📄 VF stats for {esxi_host} ({nic_name}) will be saved to: {output_dir}")
-        t = threading.Thread(
+        monitor_thread = threading.Thread(
             target=monitor_vf_stats_remote,
-            args=(
-                esxi_host,
-                nic_name,
-                getattr(cmd, "sample_interval", 10),
-                getattr(cmd, "duration", 60) + 30,
-                output_dir
-            ),
+            args=(ssh_mgr, esxi_host, nic_name, getattr(cmd, "sample_interval", 10),
+                  getattr(cmd, "duration", 60) + 30, output_dir),
             daemon=True
         )
-        t.start()
-        vf_monitor_threads.append(t)
+        monitor_thread.start()
+        monitor_threads.append(monitor_thread)
+
+    logger.info(f"📡 Started VF stats monitoring for ESXi hosts: "
+                f"{[host for (host, _) in esxi_nic_map.keys()]}")
+
+    # 🚨 Threads will run with ssh_mgr active until main joins
+    time.sleep(2)
 
     logger.info(f"📡 Started VF stats monitoring for ESXi hosts: "
                 f"{[host for (host, _) in esxi_nic_map.keys()]}")
 
     time.sleep(2)
-    return vf_monitor_threads
+    return monitor_threads
 
 
 def get_numa_cores(
@@ -818,10 +1064,27 @@ def get_numa_cores(
     cmd = f"kubectl exec {pod_name} -- numactl -s"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
+    if result.returncode == 127 or "not found" in result.stderr.lower():
+        raise RuntimeError(
+            f"❌ 'numactl' is not installed in pod {pod_name}. "
+            f"Please install it in your container image (e.g., via 'tdnf install -y numactl')."
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"❌ Failed to run `numactl -s` in pod {pod_name}. "
+            f"Make sure 'numactl' is installed in the container. "
+            f"Error: {result.stderr.strip()}"
+        )
+
     for line in result.stdout.splitlines():
         if "physcpubind:" in line:
             return line.split("physcpubind:")[1].strip()
-    return None
+
+    raise RuntimeError(
+        f"❌ Could not find 'physcpubind' in numactl output for pod {pod_name}.\n"
+        f"Output:\n{result.stdout}"
+    )
 
 
 def collect_pods_related(
@@ -851,8 +1114,10 @@ def collect_pods_related(
         _n = get_numa_cores(pod)
         if _n is None:
             raise RuntimeError("failed acquire numa information.")
+
         numa_ = get_numa_cores(pod).strip()
         node_ = pod_to_node.get(pod, "unknown")
+
         return pod, mac_, numa_, node_
 
     all_pods = tx_pods + rx_pods
@@ -1429,30 +1694,30 @@ def sample_pktgen_stats_via_socat(
     """Sample stats from pktgen using socat as control channel
     and store them in a file."""
 
-    lua_script = (
-        "local ts = os.date('!%Y-%m-%dT%H:%M:%S'); "
-
-        "local rate = pktgen.portStats(0, 'rate'); "
-        f"if rate and rate[0] then "
-        f"local f1 = io.open('{rate_file}', 'a'); "
-        "local str = ts .. ','; "
-        "for k,v in pairs(rate[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
-        "f1:write(str:sub(1, -2), '\\n'); f1:close(); end; "
-
-        "local pkt = pktgen.pktStats(0)[0]; "
-        f"if pkt then "
-        f"local f2 = io.open('{pkt_file}', 'a'); "
-        "local str = ts .. ','; "
-        "for k,v in pairs(pkt) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
-        "f2:write(str:sub(1, -2), '\\n'); f2:close(); end; "
-
-        "local port = pktgen.portStats(0, 'port'); "
-        f"if port and port[0] then "
-        f"local f3 = io.open('{port_file}', 'a'); "
-        "local str = ts .. ','; "
-        "for k,v in pairs(port[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
-        "f3:write(str:sub(1, -2), '\\n'); f3:close(); end; "
-    )
+    # lua_script = (
+    #     "local ts = os.date('!%Y-%m-%dT%H:%M:%S'); "
+    #
+    #     "local rate = pktgen.portStats(0, 'rate'); "
+    #     f"if rate and rate[0] then "
+    #     f"local f1 = io.open('{rate_file}', 'a'); "
+    #     "local str = ts .. ','; "
+    #     "for k,v in pairs(rate[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+    #     "f1:write(str:sub(1, -2), '\\n'); f1:close(); end; "
+    #
+    #     "local pkt = pktgen.pktStats(0)[0]; "
+    #     f"if pkt then "
+    #     f"local f2 = io.open('{pkt_file}', 'a'); "
+    #     "local str = ts .. ','; "
+    #     "for k,v in pairs(pkt) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+    #     "f2:write(str:sub(1, -2), '\\n'); f2:close(); end; "
+    #
+    #     "local port = pktgen.portStats(0, 'port'); "
+    #     f"if port and port[0] then "
+    #     f"local f3 = io.open('{port_file}', 'a'); "
+    #     "local str = ts .. ','; "
+    #     "for k,v in pairs(port[0]) do str = str .. k .. '=' .. tostring(v) .. ',' end; "
+    #     "f3:write(str:sub(1, -2), '\\n'); f3:close(); end; "
+    # )
 
     # socat_cmd = f"echo \"{lua_script}\" | socat - TCP4:localhost:{port}"
     socat_cmd = f"cat /sample_pktgen.lua | socat - TCP4:localhost:{port}"
@@ -1520,11 +1785,13 @@ def launch_pktgen(
         rx_cores: str,
         all_cores: str,
         cmd: argparse.Namespace,
-        session_name: str
+        session_name: str,
+        port_to_core: str,
 ):
     """
     Launches pktgen in a Kubernetes pod, either interactively or via tmux session.
 
+    :param port_to_core:
     :param pod: Kubernetes TX pod name
     :param main_core: main lcore for pktgen. ( main core is separate core for stats)
     :param tx_cores: TX core range ( a core set for transmit)
@@ -1551,14 +1818,30 @@ def launch_pktgen(
     #     f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0"
     # )
 
+    # if cmd.latency_mode:
+    #     assert len(core_list) >= 5,
+    #     main_core = core_list[0]
+    #     tx_cores_port0 = core_list[1]
+    #     rx_cores_port0 = core_list[2]
+    #     tx_cores_port1 = core_list[3]
+    #     rx_cores_port1 = core_list[4]
+    #
+    #     port_mappings = (
+    #         f"-m [{tx_cores_port0}:{rx_cores_port0}].0 "
+    #         f"-m [{tx_cores_port1}:{rx_cores_port1}].1"
+    #     )
+
     pktgen_cmd = (
         f"cd /usr/local/bin; timeout {timeout_duration} pktgen --no-telemetry -l "
         f"{all_cores} -n 4 --socket-mem {cmd.tx_socket_mem} --main-lcore {main_core} "
         f"--proc-type auto --file-prefix pg_{pod} "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
         f"-- -G --txd={cmd.txd} --rxd={cmd.rxd} "
-        f"-f {lua_script_path} -m [{tx_cores}:{rx_cores}].0"
+        f"-f {lua_script_path} {port_to_core}"
     )
+    #
+    # -m[{tx_cores}:{rx_cores}]
+    # .0
 
     kubectl_cmd = f"kubectl exec -it {pod} -- sh -c '{pktgen_cmd}'"
     window_name = pod
@@ -1603,20 +1886,20 @@ def tmux_session_exists(
 
 
 def ensure_tmux_window_ready(
-        session: str,
+        t_sessesion: str,
         window: str,
         timeout: int = 3
 ):
     """
 
-    :param session:
+    :param t_sessesion:
     :param window:
     :param timeout:
     :return:
     """
     for _ in range(timeout * 10):
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", session],
+            ["tmux", "list-windows", "-t", t_sessesion],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1624,7 +1907,7 @@ def ensure_tmux_window_ready(
         if window in result.stdout:
             return
         time.sleep(0.1)
-    raise RuntimeError(f"❌ Timed out waiting for window '{window}' in session '{session}'")
+    raise RuntimeError(f"❌ Timed out waiting for window '{window}' in session '{t_sessesion}'")
 
 
 def prepare_tmux_session(
@@ -1726,10 +2009,23 @@ def start_pktgen_on_tx_pods(
         # Single core test: If only two cores are available, use them for TX and RX
         main_core = numa_cores[0]
         usable_cores = numa_cores[1:]
+        total_usable = len(usable_cores)
 
+        ports_needed = 2 if cmd.latency else 1
+        cores_per_port = 2  # 1 TX + 1 RX per port
+        min_required = ports_needed * cores_per_port
+
+        if total_usable < min_required:
+            logger.warning(
+                f"[⚠️] Not enough cores for pod {pod} in {'latency' if cmd.latency else 'regular'} mode. "
+                f"Required: {min_required}, Available: {total_usable}")
+            return None
+
+        # single core per pod
         if len(numa_cores) == 2:
             tx_cores = rx_cores = numa_cores[1]
         else:
+            # n cores ( latency (2 port) or pps test with (1 port per pod)
             total_cores = len(numa_cores)
             txrx_cores = (total_cores - 1) // 2
             if txrx_cores % 2 != 0:
@@ -1739,10 +2035,32 @@ def start_pktgen_on_tx_pods(
             tx_cores = sorted([numa_cores[i + 1] for i in range(txrx_cores)])
             rx_cores = sorted([numa_cores[txrx_cores + 1 + i] for i in range(txrx_cores)])
 
-            tx_core_range = f"{tx_cores[0]}-{tx_cores[-1]}" if len(tx_cores) > 1 else f"{tx_cores[0]}"
-            rx_core_range = f"{rx_cores[0]}-{rx_cores[-1]}" if len(rx_cores) > 1 else f"{rx_cores[0]}"
-            tx_cores = tx_core_range
-            rx_cores = rx_core_range
+            if cmd.latency:
+
+                # it should be sorted, but we handle a case if it not.
+                tx_cores = sorted([numa_cores[i + 1] for i in range(txrx_cores)])
+                rx_cores = sorted([numa_cores[txrx_cores + 1 + i] for i in range(txrx_cores)])
+
+                # for latency we split all TX / 2 since we need to port
+                # and RX / 2
+                half = len(tx_cores) // 2
+                tx0 = tx_cores[:half]
+                rx0 = rx_cores[:half]
+                tx1 = tx_cores[half:]
+                rx1 = rx_cores[half:]
+
+                port_to_core = (
+                    f"-m [{','.join(tx0)}:{','.join(rx0)}].0 "
+                    f"-m [{','.join(tx1)}:{','.join(rx1)}].1"
+                )
+
+            else:
+
+                tx_core_range = f"{tx_cores[0]}-{tx_cores[-1]}" if len(tx_cores) > 1 else f"{tx_cores[0]}"
+                rx_core_range = f"{rx_cores[0]}-{rx_cores[-1]}" if len(rx_cores) > 1 else f"{rx_cores[0]}"
+                tx_cores = tx_core_range
+                rx_cores = rx_core_range
+                port_to_core = f"-m [{tx_cores}:{rx_cores}].0"
 
         all_core_str = ",".join([main_core] + usable_cores)
 
@@ -1750,7 +2068,16 @@ def start_pktgen_on_tx_pods(
             return None
 
         try:
-            launch_pktgen(pod, main_core, tx_cores, rx_cores, all_core_str, cmd, session_name)
+            launch_pktgen(
+                pod,
+                main_core,
+                tx_cores,
+                rx_cores,
+                all_core_str,
+                cmd,
+                session_name,
+                port_to_core
+            )
         except Exception as e:
             logger.error(f"[❌] Failed to launch pktgen in {pod}: {e}")
             return None
@@ -2103,12 +2430,14 @@ def send_pktgen_stop(
 
 
 def get_active_vfs(
+        ssh_mgr: SSHConnectionManager,
         esxi_host,
         nic_name
 ):
     """Fetch list of active VF IDs for a given NIC."""
     try:
-        output = run_ssh_command(esxi_host, ["esxcli", "network", "sriovnic", "vf", "list", "-n", nic_name])
+        output = run_ssh_command_persistent(ssh_mgr, esxi_host, [
+            "esxcli", "network", "sriovnic", "vf", "list", "-n", nic_name])
         vfs = []
         for line in output.splitlines():
             match = re.match(r"\s*(\d+)\s+true", line)
@@ -2138,7 +2467,7 @@ def get_unicast_pkt_counts(nic_name, vf_id):
 
 def main_start_generator(
         cmd: argparse.Namespace
-) -> None:
+) -> List[threading.Thread]:
     """ Starts dpdk_testpmd on RX pods and pktgen on TX pods unless skipped via flags.
     :param cmd: args
     :return: Nothing
@@ -2166,8 +2495,9 @@ def main_start_generator(
     if not esxi_map:
         raise RuntimeError("❌ No ESXi mapping found. Check node labels or node selector.")
 
+    ssh_mgr = SSHConnectionManager(cmd.default_username, cmd.default_password)
     vf_monitor_threads = start_esxi_collector(
-        tx_nodes, rx_nodes, esxi_map, cmd, base_output_dir)
+        ssh_mgr, tx_nodes, rx_nodes, esxi_map, cmd, base_output_dir)
 
     if not cmd.skip_copy:
         copy_flows_to_pods(tx_pods, rx_pods)
@@ -2261,8 +2591,8 @@ def main_start_generator(
         if cmd.debug:
             debug_dump_npz_results(pair_dir)
 
-    for t in vf_monitor_threads:
-        t.join()
+    for t_ in vf_monitor_threads:
+        t_.join()
 
     logger.info("✅ VF sampling threads completed.")
     logger.info("📁 All results saved in 'results/' directory.")
@@ -2273,6 +2603,11 @@ def main_start_generator(
         logger.info(f"🧹 Cleaned up tmux session: {session_name}")
     except Exception as e:
         logger.error(f"❌ Failed to kill tmux session: {e}")
+
+    if ssh_mgr is not None:
+        ssh_mgr.close_all()
+
+    return vf_monitor_threads
 
 
 def parse_int_list(csv_str: str) -> List[int]:
@@ -2390,6 +2725,85 @@ def render_paired_lua_profile(
             pkt_size=pkt_size
         ))
     logger.info(f"[✔] Generated: {output_file}")
+
+
+#
+# def render_latency_lua_profile(
+#         src_mac: str,
+#         dst_mac: str,
+#         base_src_ip: str,
+#         base_dst_ip: str,
+#         base_src_port: str,
+#         base_dst_port: str,
+#         rate: int,
+#         pkt_size: int,
+#         output_dir: str
+# ) -> None:
+#     """
+#     Renders lua profiles, we take template and replace value based
+#     on what we need. Specifically that focus on range capability with increment on
+#     pktgen side.
+#
+#     :param src_mac: a src mac that we resolve via kubectl from pod.
+#     :param dst_mac: a dst mac that we resolve via kubectl from pod.
+#     :param base_src_ip: base ip address of source pod.
+#     :param base_dst_ip: base ip address of destination pod.
+#     :param base_src_port: base port of source pod.
+#     :param base_dst_port: base port of destination pod.
+#     :param rate: rate of lua profile generation ( percentage from port speeed) - it rate cmd in pktgen
+#     :param pkt_size: pkt size that we set via pktgen pkt size cmd.
+#     :param num_flows: number of flows we want to generate.
+#     :param flow_mode: flow mode.
+#     :param output_dir: where to save data.
+#     :return:
+#     """
+#     os.makedirs(output_dir, exist_ok=True)
+#     base_src = ip_address(base_src_ip)
+#     base_dst = ip_address(base_dst_ip)
+#     src_port = int(base_src_port)
+#     dst_port = int(base_dst_port)
+#
+#     #  max values for ranges in IP space
+#     src_max_ip = str(base_src + num_flows - 1) if "s" in flow_mode else str(base_src)
+#     dst_max_ip = str(base_dst + num_flows - 1) if "d" in flow_mode else str(base_dst)
+#
+#     src_port_max = src_port + num_flows - 1 if "S" in flow_mode else src_port
+#     dst_port_max = dst_port + num_flows - 1 if "D" in flow_mode else dst_port
+#
+#     ip_inc = "0.0.0.1"
+#     src_ip_inc = ip_inc if "s" in flow_mode else "0.0.0.0"
+#     dst_ip_inc = ip_inc if "d" in flow_mode else "0.0.0.0"
+#     src_port_inc = 1 if "S" in flow_mode else 0
+#     dst_port_inc = 1 if "D" in flow_mode else 0
+#
+#     filename = f"profile_{num_flows}_flows_pkt_size_{pkt_size}B_{rate}_rate_{flow_mode}.lua"
+#     output_file = os.path.join(output_dir, filename)
+#
+#     with open(output_file, "w") as f:
+#         f.write(LUA_UDP_LATENCY_TEMPLATE.format(
+#             rate=rate,
+#             dst_mac=dst_mac,
+#             src_mac=src_mac,
+#
+#             dst_ip=str(base_dst),
+#             dst_ip_inc=dst_ip_inc,
+#             dst_max_ip=dst_max_ip,
+#
+#             src_ip=str(base_src),
+#             src_ip_inc=src_ip_inc,
+#             src_max_ip=src_max_ip,
+#
+#             dst_port=dst_port,
+#             dst_port_inc=dst_port_inc,
+#             dst_port_max=dst_port_max,
+#
+#             src_port=src_port,
+#             src_port_inc=src_port_inc,
+#             src_port_max=src_port_max,
+#
+#             pkt_size=pkt_size
+#         ))
+#     logger.info(f"[✔] Generated: {output_file}")
 
 
 def upload_npz_to_wandb(
@@ -2623,7 +3037,7 @@ if __name__ == '__main__':
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    gen = subparsers.add_parser("generate_flow", help="🛠 Generate Pktgen Lua flows")
+    gen = subparsers.add_parser("generate_flow", aliases=["gen"], help="🛠 Generate Pktgen Lua flows")
     gen.add_argument("--base-src-ip", default="192.168.1.1", help="Base source IP")
     gen.add_argument("--base-dst-ip", default="192.168.2.1", help="Base destination IP")
     gen.add_argument("--base-src-port", default="1024", help="Base source port")
@@ -2634,6 +3048,7 @@ if __name__ == '__main__':
                      help="Comma-separated rates (e.g., 10,50,100)")
     gen.add_argument("--pkt-size", type=str, default="64",
                      help="Comma-separated packet sizes (e.g., 64,128,512,1500,2000,9000)")
+
     gen.add_argument(
         "--flow-mode",
         type=str,
@@ -2669,7 +3084,15 @@ if __name__ == '__main__':
         help="Log file name if using file or both (default: benchmark.log)"
     )
 
-    start = subparsers.add_parser("start_generator", help="🚀 Start pktgen & testpmd using selected profile")
+    start = subparsers.add_parser("start_generator",
+                                  aliases=["start"],
+                                  help="🚀 Start pktgen & testpmd using selected profile")
+    start.add_argument(
+        "--latency", action="store_true",
+        help="🧪 Run latency (convergence) test instead of PPS test. "
+             "Uses convergence Lua template with binary rate search."
+    )
+
     start.add_argument("--txd", type=int, default=2048, help="🚀 TX (Transmit) descriptor count")
     start.add_argument("--rxd", type=int, default=2048, help="📡 RX (Receive) descriptor count")
 
@@ -2746,6 +3169,15 @@ if __name__ == '__main__':
         help="🖧 NIC name on ESXi host to monitor VF stats (default: vmnic3)"
     )
 
+    start.add_argument(
+        "--default-username", type=str, default="root",
+        help="🔐 Default SSH username for ESXi hosts (default: root)"
+    )
+    start.add_argument(
+        "--default-password", type=str, default="VMware1!",
+        help="🔐 Default SSH password for ESXi hosts (default: VMware1!)"
+    )
+
     # Discover available profiles
     available_profiles = discover_available_profiles()
     profile_help = (
@@ -2762,6 +3194,26 @@ if __name__ == '__main__':
     upload = subparsers.add_parser("upload_wandb", help="📤 Upload existing results to Weights & Biases")
     upload.add_argument("--expid", type=str, required=False, help="Experiment ID used in filenames")
     upload.add_argument("--result-dir", type=str, default="results", help="Directory containing .npz results")
+
+    # sub-parse to validate experiment
+    validate = subparsers.add_parser("validate_npz", help="🔍 Validate a .npz result file")
+    validate.add_argument(
+        "--file", type=str, required=True, help="Path to .npz result file to validate"
+    )
+    validate.add_argument(
+        "--min-samples", type=int, default=5, help="Minimum valid sample count (default: 5)"
+    )
+
+    # TODO move out to global
+    validate.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    )
+    validate.add_argument(
+        "--log-output", default="console", choices=["console", "file", "both"]
+    )
+    validate.add_argument(
+        "--log-file", default="benchmark.log"
+    )
 
     args = parser.parse_args()
 
@@ -2801,8 +3253,10 @@ if __name__ == '__main__':
             raise ValueError("❌ --txd must be a power of 2.")
         if not is_power_of_two(args.rxd):
             raise ValueError("❌ --rxd must be a power of 2.")
+
+        vf_monitor_threads = None
         try:
-            main_start_generator(args)
+            vf_monitor_threads = main_start_generator(args)
         except KeyboardInterrupt:
             logger.warning("🛑 KeyboardInterrupt received! Attempting cleanup...")
             session = f"pktgen_{args.profile.split('.')[0]}"
@@ -2813,5 +3267,15 @@ if __name__ == '__main__':
             except Exception as e_:
                 logger.error(f"❌ Failed to kill tmux session: {e_}")
 
+            if vf_monitor_threads:
+                for t in vf_monitor_threads:
+                    t.join()
+
+            sys.exit(130)
+
     elif args.command == "upload_wandb":
         upload_npz_to_wandb(result_dir=args.result_dir, expid=args.expid)
+    elif args.command == "validate_npz":
+        is_valid, message = check_npz_validity(args.file, args.min_samples)
+        print(f"{'✅' if is_valid else '❌'} {args.file} → {message}")
+        sys.exit(0 if is_valid else 1)
