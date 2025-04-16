@@ -262,7 +262,7 @@ end
 main();
 """
 
-LUA_UDP_LATENCY_TEMPLATE = """\
+LUA_UDP_LATENCY_TEMPLATE_CONVERGENCE = """\
 package.path = package.path ..";?.lua;test/?.lua;app/?.lua;"
 require "Pktgen"
 
@@ -320,26 +320,105 @@ local function runTrial(pkt_size, rate, duration, count)
 end
 
 local function run(pkt_size)
+
     local max_rate = 100
     local min_rate = 1
     local trial_rate = initialRate
     local num_dropped
 
-    for count = 1, 10 do
-        runTrial(pkt_size, trial_rate, duration, count)
-        -- sample externally via socat
-        trial_rate = min_rate + ((max_rate - min_rate) / 2)
-    end
+    max_rate = 100;
+	min_rate = 1;
+	trial_rate = initialRate;
 
+	for count=1, 10, 1
+	do
+		num_dropped = runTrial(pkt_size, trial_rate, duration, count);
+		if num_dropped == 0
+		then
+			min_rate = trial_rate;
+		else
+			max_rate = trial_rate;
+		end
+		trial_rate = min_rate + ((max_rate - min_rate)/2);
+	end
+	
     trial_rate = min_rate
     runTrial(pkt_size, trial_rate, confirmDuration, 0)
 end
 
 function main()
-    for _, size in ipairs(pkt_sizes) do
-        setup(initialRate, size)
-        run(size)
-    end
+
+    pkt_size=pkt_sizes[1]
+    setup(initialRate, pkt_size)
+    run(pkt_size)
+end
+
+main()
+"""
+
+LUA_UDP_LATENCY_TEMPLATE_FIXED = """\
+package.path = package.path ..";?.lua;test/?.lua;app/?.lua;"
+require "Pktgen"
+
+local pkt_sizes = {{pkt_sizes}};
+local duration = {duration};
+local confirmDuration = {confirm_duration};
+local pauseTime = {pause_time};
+
+local sendport = "0";
+local recvport = "1";
+
+local dstip = "{dst_ip}";
+local srcip = "{src_ip}";
+local netmask = "{netmask}";
+local initialRate = {initial_rate};
+
+local function setup(rate, pktsize)
+    pktgen.dst_mac("0", "start", "{dst_mac_port0}")
+    pktgen.src_mac("0", "start", "{src_mac_port0}")
+
+    pktgen.dst_mac("1", "start", "{dst_mac_port1}")
+    pktgen.src_mac("1", "start", "{src_mac_port1}")
+
+    pktgen.set_ipaddr(sendport, "dst", dstip)
+    pktgen.set_ipaddr(sendport, "src", srcip..netmask)
+
+    pktgen.set_ipaddr(recvport, "dst", srcip)
+    pktgen.set_ipaddr(recvport, "src", dstip..netmask)
+
+    pktgen.set_proto(sendport..","..recvport, "udp")
+
+    pktgen.set(sendport, "count", 0)
+    pktgen.set(sendport, "rate", rate)
+    pktgen.set(sendport, "size", pktsize)
+
+    pktgen.latency(sendport, "enable")
+    pktgen.latency(sendport, "rate", 1000)
+    pktgen.latency(sendport, "entropy", 12)
+
+    pktgen.latency(recvport, "enable")
+    pktgen.latency(recvport, "rate", 10000)
+    pktgen.latency(recvport, "entropy", 8)
+end
+
+local function runTrial(pkt_size, rate, duration, count)
+
+    pktgen.clr()
+    pktgen.set(sendport, "rate", rate)
+    pktgen.set(sendport, "size", pkt_size)
+
+    pktgen.start(sendport)
+    pktgen.delay(duration)
+    pktgen.stop(sendport)
+
+    pktgen.delay(pauseTime)
+end
+
+
+function main()
+    pkt_size = pkt_sizes[1]
+    setup(initialRate, pkt_size)
+    runTrial(pkt_size, initialRate, confirmDuration, 0)
 end
 
 main()
@@ -451,6 +530,89 @@ end
 
 main();
 """
+
+
+def discover_experiments(root_dir="results"):
+    """Return a list of (exp_id, tx_file_path) tuples for sorting and processing."""
+    experiments = []
+    for dirpath, _, filenames in os.walk(root_dir):
+        for fname in filenames:
+            if fname.endswith(".npz") and "_tx_" in fname or "_rx_":
+                match = re.match(r"^([a-f0-9]{8})_", fname)
+                if match:
+                    exp_id_ = match.group(1)
+                    full_path = os.path.join(dirpath, fname)
+                    experiments.append((exp_id_, full_path))
+    return experiments
+
+
+def sanity_check(
+        exp_dirs_by_id: Dict[str, List[str]]
+) -> Dict[str, bool]:
+    """
+    Validates the integrity and completeness of experiment result directories.
+
+    For each experiment ID, the function checks:
+    - That the number of result directories (TX/RX pod pairs) is equal to the maximum found across all experiments.
+    - That each result directory contains all expected files:
+        - One TX .npz result file (filename includes "_tx_")
+        - One RX .npz result file (filename includes "_rx_")
+        - metadata.txt
+        - RX stats log (e.g., "rx0_stats.log")
+        - RX warmup log (e.g., "rx0_warmup.log")
+        - TX port rate stats CSV (e.g., "tx0_port_rate_stats.csv")
+        - TX port stats CSV (e.g., "tx0_port_stats.csv")
+
+    If any directory under an experiment is incomplete or missing, that entire experiment is marked as invalid.
+}
+    """
+    sanity_results = {}
+
+    # each profile under experiment must have same number of pair
+    max_len = max(len(v) for v in exp_dirs_by_id.values())
+    for exp_id, exp_dir in exp_dirs_by_id.items():
+        if len(exp_dir) < max_len:
+            sanity_results[exp_id] = False
+            continue
+
+        exp_results = {}
+        for r_dir in exp_dir:
+            try:
+                filenames = os.listdir(r_dir)
+                required_files = {
+                    "tx_npz": False,
+                    "rx_npz": False,
+                    "metadata": False,
+                    "rx_stats": False,
+                    "rx_warmup": False,
+                    "tx_rate_stats": False,
+                    "tx_port_stats": False,
+                }
+
+                for f in filenames:
+                    if f.endswith(".npz") and "_tx_" in f:
+                        required_files["tx_npz"] = True
+                    elif f.endswith(".npz") and "_rx_" in f:
+                        required_files["rx_npz"] = True
+                    elif f == "metadata.txt":
+                        required_files["metadata"] = True
+                    elif f.startswith("rx") and f.endswith("_stats.log"):
+                        required_files["rx_stats"] = True
+                    elif f.startswith("rx") and f.endswith("_warmup.log"):
+                        required_files["rx_warmup"] = True
+                    elif f.startswith("tx") and f.endswith("_port_rate_stats.csv"):
+                        required_files["tx_rate_stats"] = True
+                    elif f.startswith("tx") and f.endswith("_port_stats.csv"):
+                        required_files["tx_port_stats"] = True
+
+                exp_results[r_dir] = all(required_files.values())
+
+            except FileNotFoundError:
+                exp_results[r_dir] = False
+
+        sanity_results[exp_id] = all(exp_results.values())
+
+    return sanity_results
 
 
 def parse_testpmd_log(
@@ -727,31 +889,64 @@ def get_mac_address(
     return match.group(0) if match else None
 
 
-def check_npz_validity(npz_path, min_samples=5):
+def check_npz_validity(
+        npz_file_path: str,
+        min_samples: int = 1) -> (bool, str):
+    """
+    Validate the contents of a .npz file for a DPDK experiment result.
+
+    This function determines whether the given .npz file is from a TX or RX pod
+    (based on filename), then validates the presence and basic structure of expected
+    keys for each type.
+
+    For RX files:
+      - Must contain keys: rx_pps, tx_pps, rx_bytes, rx_packets
+      - rx_pps must not be None and must have at least `min_samples` elements
+
+    For TX files:
+      - Must contain keys: pkts_tx, obytes, opackets, port_obytes
+      - Each key must exist, not be None, and (if it's a NumPy array) contain
+        at least `min_samples` elements
+
+    :param npz_file_path:
+    :param min_samples:
+    :return:
+    """
     try:
-        data = np.load(npz_path)
-        keys = list(data.keys())
+        data = np.load(npz_file_path)
+        keys = set(data.files)
 
-        if not keys:
-            return False, "No data keys found"
+        is_rx = "_rx_" in npz_file_path
+        is_tx = "_tx_" in npz_file_path
 
-        # Check expected keys
-        if "rx_pps" not in keys and "tx_pps" not in keys:
-            return False, "Missing rx_pps/tx_pps"
+        if not (is_rx or is_tx):
+            return False, "Cannot determine TX or RX file type"
 
-        # Check length of main series
-        samples = len(data["rx_pps"]) if "rx_pps" in data else len(data["tx_pps"])
-        if samples < min_samples:
-            return False, f"Too few samples ({samples})"
+        if is_rx:
+            required_rx_keys = ["rx_pps", "tx_pps", "rx_bytes", "rx_packets"]
+            for key in required_rx_keys:
+                if key not in keys:
+                    return False, f"Missing key: {key}"
+                if key == "rx_pps" and data[key] is None:
+                    return False, "rx_pps is None"
+                if key == "rx_pps" and len(data[key]) < min_samples:
+                    return False, f"Too few samples: {len(data[key])} < {min_samples}"
 
-        # Check all-zero condition
-        if np.all(data["rx_pps"] == 0):
-            return False, "rx_pps is all zero"
+        if is_tx:
+            required_tx_keys = ["pkts_tx", "obytes", "opackets", "port_obytes"]
+            for key in required_tx_keys:
+                if key not in keys:
+                    return False, f"Missing key: {key}"
+                if data[key] is None:
+                    return False, f"{key} is None"
+                if isinstance(data[key], np.ndarray) and len(data[key]) < min_samples:
+                    return False, f"Too few samples: {len(data[key])} < {min_samples}"
 
-        return True, f"Valid ({samples} samples)"
+        return True, f"Valid ({len(data[list(data.keys())[0]])} samples)"
 
     except Exception as e:
-        return False, f"Load error: {str(e)}"
+        return False, f"Error reading npz: {e}"
+
 
 
 def has_profile_run(
@@ -1431,6 +1626,7 @@ def main_generate(
     :param cmd:
     :return:
     """
+
     tx_pods, rx_pods = get_pods()
     tx_macs, rx_macs, tx_numa, rx_numa, tx_nodes, rx_nodes = collect_pods_related(tx_pods, rx_pods)
     os.makedirs("flows", exist_ok=True)
@@ -1444,30 +1640,73 @@ def main_generate(
             logger.info(f"❌ Invalid rate: {rate}. Rate must be between 1 and 100 (inclusive).")
             exit(1)
 
-    for size in pkt_sizes:
-        if not (64 <= size <= 9000):
-            logger.info(f"❌ Invalid packet size: {size}. Must be between 64 and 9000.")
-            exit(1)
+    if cmd.gen_mode == "paired":
+        for size in pkt_sizes:
+            if not (64 <= size <= 9000):
+                logger.info(f"❌ Invalid packet size: {size}. Must be between 64 and 9000.")
+                exit(1)
 
-    for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
-        flow_dir = f"flows/{t}-{r}"
-        os.makedirs(flow_dir, exist_ok=True)
-        logger.info(f"📂 Generating flows in {flow_dir}")
+        for t, r, tx_mac, rx_mac, tx_numa, rx_numa in zip(tx_pods, rx_pods, tx_macs, rx_macs, tx_numa, rx_numa):
+            flow_dir = f"flows/{t}-{r}"
+            os.makedirs(flow_dir, exist_ok=True)
+            logger.info(f"📂 Generating flows in {flow_dir}")
 
-        for flow, rate, size in product(flow_counts, rates, pkt_sizes):
-            render_paired_lua_profile(
-                src_mac=tx_mac,
-                dst_mac=rx_mac,
-                base_src_ip=cmd.base_src_ip,
-                base_dst_ip=cmd.base_dst_ip,
-                base_src_port=cmd.base_src_port,
-                base_dst_port=cmd.base_dst_port,
-                rate=rate,
-                pkt_size=size,
-                num_flows=flow,
-                flow_mode=cmd.flow_mode,
-                output_dir=flow_dir
-            )
+            for flow, rate, size in product(flow_counts, rates, pkt_sizes):
+                render_paired_lua_profile(
+                    src_mac=tx_mac,
+                    dst_mac=rx_mac,
+                    base_src_ip=cmd.base_src_ip,
+                    base_dst_ip=cmd.base_dst_ip,
+                    base_src_port=cmd.base_src_port,
+                    base_dst_port=cmd.base_dst_port,
+                    rate=rate,
+                    pkt_size=size,
+                    num_flows=flow,
+                    flow_mode=cmd.flow_mode,
+                    output_dir=flow_dir
+                )
+    elif cmd.gen_mode == "latency":
+        for t, r, tx_mac, rx_mac in zip(tx_pods, rx_pods, tx_macs, rx_macs):
+            flow_dir = f"flows/{t}-{r}"
+            os.makedirs(flow_dir, exist_ok=True)
+            logger.info(f"📡 Generating latency flows in {flow_dir}")
+
+            for rate, size in product(rates, pkt_sizes):
+                render_latency_lua_profile(
+                    src_mac_port=tx_mac,
+                    dst_mac_port=rx_mac,
+                    base_src_ip=cmd.base_src_ip,
+                    base_dst_ip=cmd.base_dst_ip,
+                    pkt_sizes=[size],
+                    duration=10000,
+                    confirm_duration=60000,
+                    pause_time=1000,
+                    initial_rate=rate,
+                    netmask="/24",
+                    output_dir=flow_dir,
+                    convergence=False
+                )
+    elif cmd.gen_mode == "converge":
+        for t, r, tx_mac, rx_mac in zip(tx_pods, rx_pods, tx_macs, rx_macs):
+            flow_dir = f"flows/{t}-{r}"
+            os.makedirs(flow_dir, exist_ok=True)
+            logger.info(f"📡 Generating latency flows in {flow_dir}")
+
+            for rate, size in product(rates, pkt_sizes):
+                render_latency_lua_profile(
+                    src_mac_port=tx_mac,
+                    dst_mac_port=rx_mac,
+                    base_src_ip=cmd.base_src_ip,
+                    base_dst_ip=cmd.base_dst_ip,
+                    pkt_sizes=[size],
+                    duration=10000,
+                    confirm_duration=60000,
+                    pause_time=1000,
+                    initial_rate=rate,
+                    netmask="/24",
+                    output_dir=flow_dir,
+                    convergence=False
+                )
 
 
 def warmup_mac_learning(
@@ -2728,82 +2967,66 @@ def render_paired_lua_profile(
 
 
 #
-# def render_latency_lua_profile(
-#         src_mac: str,
-#         dst_mac: str,
-#         base_src_ip: str,
-#         base_dst_ip: str,
-#         base_src_port: str,
-#         base_dst_port: str,
-#         rate: int,
-#         pkt_size: int,
-#         output_dir: str
-# ) -> None:
-#     """
-#     Renders lua profiles, we take template and replace value based
-#     on what we need. Specifically that focus on range capability with increment on
-#     pktgen side.
-#
-#     :param src_mac: a src mac that we resolve via kubectl from pod.
-#     :param dst_mac: a dst mac that we resolve via kubectl from pod.
-#     :param base_src_ip: base ip address of source pod.
-#     :param base_dst_ip: base ip address of destination pod.
-#     :param base_src_port: base port of source pod.
-#     :param base_dst_port: base port of destination pod.
-#     :param rate: rate of lua profile generation ( percentage from port speeed) - it rate cmd in pktgen
-#     :param pkt_size: pkt size that we set via pktgen pkt size cmd.
-#     :param num_flows: number of flows we want to generate.
-#     :param flow_mode: flow mode.
-#     :param output_dir: where to save data.
-#     :return:
-#     """
-#     os.makedirs(output_dir, exist_ok=True)
-#     base_src = ip_address(base_src_ip)
-#     base_dst = ip_address(base_dst_ip)
-#     src_port = int(base_src_port)
-#     dst_port = int(base_dst_port)
-#
-#     #  max values for ranges in IP space
-#     src_max_ip = str(base_src + num_flows - 1) if "s" in flow_mode else str(base_src)
-#     dst_max_ip = str(base_dst + num_flows - 1) if "d" in flow_mode else str(base_dst)
-#
-#     src_port_max = src_port + num_flows - 1 if "S" in flow_mode else src_port
-#     dst_port_max = dst_port + num_flows - 1 if "D" in flow_mode else dst_port
-#
-#     ip_inc = "0.0.0.1"
-#     src_ip_inc = ip_inc if "s" in flow_mode else "0.0.0.0"
-#     dst_ip_inc = ip_inc if "d" in flow_mode else "0.0.0.0"
-#     src_port_inc = 1 if "S" in flow_mode else 0
-#     dst_port_inc = 1 if "D" in flow_mode else 0
-#
-#     filename = f"profile_{num_flows}_flows_pkt_size_{pkt_size}B_{rate}_rate_{flow_mode}.lua"
-#     output_file = os.path.join(output_dir, filename)
-#
-#     with open(output_file, "w") as f:
-#         f.write(LUA_UDP_LATENCY_TEMPLATE.format(
-#             rate=rate,
-#             dst_mac=dst_mac,
-#             src_mac=src_mac,
-#
-#             dst_ip=str(base_dst),
-#             dst_ip_inc=dst_ip_inc,
-#             dst_max_ip=dst_max_ip,
-#
-#             src_ip=str(base_src),
-#             src_ip_inc=src_ip_inc,
-#             src_max_ip=src_max_ip,
-#
-#             dst_port=dst_port,
-#             dst_port_inc=dst_port_inc,
-#             dst_port_max=dst_port_max,
-#
-#             src_port=src_port,
-#             src_port_inc=src_port_inc,
-#             src_port_max=src_port_max,
-#
-#             pkt_size=pkt_size
-#         ))
-#     logger.info(f"[✔] Generated: {output_file}")
+def render_latency_lua_profile(
+        src_mac_port: str,
+        dst_mac_port: str,
+        base_src_ip: str,
+        base_dst_ip: str,
+        pkt_sizes: list,
+        duration: int = 10000,
+        confirm_duration: int = 60000,
+        pause_time: int = 1000,
+        initial_rate: int = 50,
+        netmask: str = "/24",
+        output_dir: str = "flows",
+        convergence: bool = True
+) -> str:
+    """
+    Render a Lua profile for fixed or convergence-based latency tests.
+
+    :param src_mac_port: Source MAC used on port 0
+    :param dst_mac_port: Destination MAC used on port 0
+    :param base_src_ip: Base source IP
+    :param base_dst_ip: Base destination IP
+    :param pkt_sizes: List of packet sizes (only the first one is used)
+    :param duration: Trial duration in milliseconds
+    :param confirm_duration: Final trial confirmation duration
+    :param pause_time: Delay between trials
+    :param initial_rate: Starting rate for convergence
+    :param netmask: Subnet mask string (e.g., /24)
+    :param output_dir: Directory to store Lua script
+    :param convergence: Whether to use convergence-based search
+    :return: Path to the generated Lua script
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    mode = "converge" if convergence else "fixed"
+    pkt_size = pkt_sizes[0]
+    filename = f"profile_latency_{mode}_pkt_size_{pkt_size}_{initial_rate}rate.lua"
+    output_path = os.path.join(output_dir, filename)
+
+    lua_template = LUA_UDP_LATENCY_TEMPLATE_CONVERGENCE if convergence else LUA_UDP_LATENCY_TEMPLATE_FIXED
+
+    lua_script = lua_template.format(
+        pkt_sizes=", ".join(str(s) for s in pkt_sizes),
+        duration=duration,
+        confirm_duration=confirm_duration,
+        pause_time=pause_time,
+        dst_ip=base_dst_ip,
+        src_ip=base_src_ip,
+        netmask=netmask,
+        initial_rate=initial_rate,
+        dst_mac_port0=src_mac_port,
+        src_mac_port0=dst_mac_port,
+        dst_mac_port1=dst_mac_port,
+        src_mac_port1=src_mac_port,
+    )
+
+    with open(output_path, "w") as f:
+        f.write(lua_script)
+
+    logger.info(f"[✔] Generated latency profile: {output_path}")
+    return output_path
 
 
 def upload_npz_to_wandb(
@@ -3066,6 +3289,17 @@ if __name__ == '__main__':
     )
 
     gen.add_argument(
+        "--gen-mode",
+        type=str,
+        default="paired",
+        choices=["paired", "converge", "latency"],
+        help="🧬 Profile generation mode:\n"
+             "  paired   - Per TX-RX pod pair (default)\n"
+             "  converge     - All profiles in a flat directory\n"
+             "  latency  - Generate latency profiles"
+    )
+
+    gen.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -3078,6 +3312,7 @@ if __name__ == '__main__':
         default="console",
         help="Where to log: 'console', 'file', or 'both' (default: console)"
     )
+
     gen.add_argument(
         "--log-file",
         default="benchmark.log",
@@ -3215,6 +3450,25 @@ if __name__ == '__main__':
         "--log-file", default="benchmark.log"
     )
 
+    sanity = subparsers.add_parser("sanity", help="🔍 Sanity check all results.")
+    # TODO move out to global
+
+    sanity.add_argument(
+        "--min-samples", type=int, default=5, help="Minimum valid sample count (default: 5)"
+    )
+
+    sanity.add_argument("--purge", action="store_true", help="Purge invalid experiment result directories")
+
+    sanity.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    )
+    sanity.add_argument(
+        "--log-output", default="console", choices=["console", "file", "both"]
+    )
+    sanity.add_argument(
+        "--log-file", default="benchmark.log"
+    )
+
     args = parser.parse_args()
 
     if getattr(args, "debug", False):
@@ -3233,7 +3487,6 @@ if __name__ == '__main__':
             print(f"\n❌ Invalid profile: {args.profile}")
             print("📂 Run with `--help` to see available profiles.")
             exit(1)
-
     if args.command == "generate_flow":
         main_generate(args)
     elif args.command == "start_generator":
@@ -3279,3 +3532,48 @@ if __name__ == '__main__':
         is_valid, message = check_npz_validity(args.file, args.min_samples)
         print(f"{'✅' if is_valid else '❌'} {args.file} → {message}")
         sys.exit(0 if is_valid else 1)
+    elif args.command == "sanity":
+
+        discovered = discover_experiments()
+        grouped = {}
+        base_dirs = {}
+
+        for exp_id, file_path in discovered:
+            grouped.setdefault(exp_id, []).append(file_path)
+            base_dirs.setdefault(exp_id, []).append(os.path.abspath(os.path.dirname(file_path)))
+
+        invalid_experiments = {}
+
+        sanity_result = sanity_check(base_dirs)
+        for exp_id, valid in sanity_result.items():
+            print(f"{exp_id}: {'✅' if valid else '❌'}")
+            if not valid:
+                invalid_experiments[exp_id] = base_dirs.get(exp_id, [])
+
+        print("\nRunning npz checks for valid experiments:")
+        for exp_id, dirs in base_dirs.items():
+            if not sanity_result.get(exp_id, False):
+                continue
+            for result_dir in dirs:
+                for f in os.listdir(result_dir):
+                    if f.endswith(".npz"):
+                        full_path = os.path.join(result_dir, f)
+                        is_valid, message = check_npz_validity(full_path, min_samples=args.min_samples)
+                        print(f"{'✅' if is_valid else '❌'} {full_path} → {message}")
+                        if not is_valid:
+                            invalid_experiments.setdefault(exp_id, []).append(result_dir)
+
+        if args.purge:
+            print("\n🧹 Purging invalid result directories:")
+            seen_dirs = set()
+            results_root = os.path.abspath("results")
+            for exp_id, paths in invalid_experiments.items():
+                for path in paths:
+                    abs_path = os.path.abspath(path)
+                    if abs_path not in seen_dirs:
+                        seen_dirs.add(abs_path)
+                        if abs_path.startswith(results_root) and os.path.isdir(abs_path):
+                            print(f"🗑 Removing {abs_path}")
+                            shutil.rmtree(abs_path, ignore_errors=True)
+                        else:
+                            print(f"⚠️ Skipping suspicious path: {abs_path}")
