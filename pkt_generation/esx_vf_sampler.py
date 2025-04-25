@@ -14,7 +14,7 @@ def clear_terminal():
 
 
 
-def get_active_vfs2(nic_name):
+def get_active_vfs(nic_name):
     """Fetch list of active VF IDs for a given NIC."""
     try:
         output = subprocess.check_output(

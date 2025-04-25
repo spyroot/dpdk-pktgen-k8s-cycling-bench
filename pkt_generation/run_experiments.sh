@@ -85,6 +85,7 @@ DEFAULT_NUM_DPDK=1      # default number of nic for DPDK
 DEFAULT_NUM_SRIOV_VF=0  # default number for nic for SRIOV kernel mode
 DEFAULT_HUGEPAGES=$(( DEFAULT_CPU - 1 ))
 DEFAULT_IMAGE="spyroot/dpdk-pktgen-k8s-cycling-bench-trex:latest-amd64"
+FORCE_REDEPLOY="false"
 
 SCAN_ONLY=false
 
@@ -110,6 +111,7 @@ function display_help() {
     echo "  -i | --image <image>           📦 Docker image to use (default: $DEFAULT_IMAGE)"
     echo "  -r | --resource <type>         🌐 Resource type: 'dpdk' or 'sriov'"
     echo "  -y | --dry-run [true|false]    📝 Whether to run in dry-run mode (default: true)"
+    echo "      --new                      ♻️  Regenerate flow profiles and re-deploy pods"
     echo "      --run                      🚀 Shortcut for --dry-run false"
     echo "      --config                   📋 Print current configuration and exit"
     echo "      --config-file <file>       📋 Save current configuration to specified file"
@@ -130,6 +132,9 @@ function display_help() {
     echo "🚀 Examples:"
     echo "  ▸ Validate setup only (dry-run mode):"
     echo "      ./run_experiments.sh -n 2 --dry-run"
+    echo ""
+    echo "  ▸ Change number of pair, num nodes and deploy new pods: "
+    echo "      ./run_experiments.sh -n 2 --no-same-node --run --new"
     echo ""
     echo "  ▸ Run tests using DPDK on the different node with default test profile:"
     echo "      ./run_experiments.sh --no-same-node --run"
@@ -351,6 +356,10 @@ while [[ $# -gt 0 ]]; do
           PROFILE_FILTER="$2"
           shift 2
           ;;
+         --new)
+        FORCE_REDEPLOY="true"
+        shift
+        ;;
         -r|--resource)
           case "$2" in
               dpdk)
@@ -414,6 +423,38 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+
+if [[ "$FORCE_REDEPLOY" == "true" ]]; then
+    echo "♻️  --new flag detected — regenerating profiles and re-creating TX/RX pods"
+
+    # Clean up existing pods (optional — or rely on create_pods.sh to overwrite)
+    kubectl delete pods -l role=tx --ignore-not-found
+    kubectl delete pods -l role=rx --ignore-not-found
+
+    # Regenerate profiles
+    python packet_generator.py generate_flow --flows "$FLOWS" --pkt-size "$PKT_SIZES" --rate "$RATE"
+
+    # Recreate pods
+    CREATE_CMD="./create_pods.sh"
+    CREATE_CMD+=" -n $DEFAULT_NUM_PAIRS"
+    CREATE_CMD+=" -c $DEFAULT_CPU"
+    CREATE_CMD+=" -m $DEFAULT_MEM_GB"
+    CREATE_CMD+=" -d $DEFAULT_NUM_DPDK"
+    CREATE_CMD+=" -v $DEFAULT_NUM_SRIOV_VF"
+    CREATE_CMD+=" -g $DEFAULT_HUGEPAGES"
+    [[ "$OPT_SAME_NODE" == "true" ]] && CREATE_CMD+=" --same-node"
+    [[ -n "${CUSTOM_IMAGE:-}" ]] && CREATE_CMD+=" --image $CUSTOM_IMAGE"
+
+    echo "🚧 Running: $CREATE_CMD"
+    eval "$CREATE_CMD"
+
+    # Refresh pod lists
+    rx_pods=($(kubectl get pods -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep '^rx[0-9]\+'))
+    tx_pods=($(kubectl get pods -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep '^tx[0-9]\+'))
+
+    wait_for_all_pods_ready
+fi
+
 # function check if results contain results for a particular profile
 function has_profile_run() {
     local profile="$1"
@@ -428,6 +469,7 @@ function has_profile_run() {
     return 1
 }
 
+#
 function report_profiles_status() {
     echo "📊 Profile Scan Report"
     echo "-----------------------"
@@ -621,9 +663,6 @@ function check_pod_node_placement() {
     return 0
 }
 
-
-
-
 # Maps all pod names to their assigned nodes
 function build_pod_node_mapping() {
 
@@ -657,7 +696,6 @@ function print_pair_node_map_for_profile() {
     done
     echo ""
 }
-
 
 
 function print_config() {
@@ -727,7 +765,7 @@ for pod in "${tx_pods[@]}"; do
     echo "   📤 $pod"
 done
 
-# number of pair must match
+# number of existing pair must match
 if [ "${#rx_pods[@]}" -ne "$DEFAULT_NUM_PAIRS" ] || [ "${#tx_pods[@]}" -ne "$DEFAULT_NUM_PAIRS" ]; then
     echo "❌ Expected $DEFAULT_NUM_PAIRS TX-RX pairs"
     echo "   Found: ${#tx_pods[@]} TX pods, ${#rx_pods[@]} RX pods"
@@ -806,8 +844,13 @@ for profile in "${profiles[@]}"; do
     fi
 done
 
-# If all are complete, back up results
+# If all are complete, back up results (only if NOT in dry-run)
 if [ "$completed" -eq "${#profiles[@]}" ]; then
+    if [[ "$OPT_DRY_RUN" == "true" ]]; then
+        echo "✅ All profiles completed. Dry-run mode is active — skipping results backup."
+        exit 0
+    fi
+
     echo "✅ All profiles completed. Backing up results..."
     mkdir -p results_backups
     BACKUP_DIR="results_backups/results_$(date +%Y%m%d_%H%M%S)"
@@ -815,7 +858,6 @@ if [ "$completed" -eq "${#profiles[@]}" ]; then
     echo "📦 Results moved to: $BACKUP_DIR"
     exit 0
 fi
-
 
 # in case we want filter ( i.e use sub-set of tests based on pkt size )
 filtered_profiles=("${profiles[@]}")
@@ -838,7 +880,6 @@ fi
 
 trap cleanup_on_interrupt INT
 
-
 # for each profile we run a test, in dry run we just print
 # (note that profile still pushed prior.
 for profile in "${filtered_profiles[@]}"; do
@@ -855,7 +896,20 @@ for profile in "${filtered_profiles[@]}"; do
     else
         echo "🚀 Starting test for profile: $profile"
         python packet_generator.py start_generator --profile "$profile" --duration "$DURATION"
+#        pid=$!
+#        echo "PID"
+#        echo $pid
+#
+#        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+#            wait "$pid"
+#            ret=$?
+#        else
+#            echo "❌ Failed to start packet_generator.py or it exited too quickly."
+#            ret=1
+#        fi
+
         ret=$?
+        # handle Ctrl+C or manual interruption
         if [[ $ret -eq 130 ]]; then
           echo "🛑 KeyboardInterrupt detected. Stopping experiment..."
           break

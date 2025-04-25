@@ -1,4 +1,7 @@
 #!/bin/bash
+"
+This manual runner mainly for debuging
+"
 
 SESSION="rx_testpmd"
 WINDOW="rx"

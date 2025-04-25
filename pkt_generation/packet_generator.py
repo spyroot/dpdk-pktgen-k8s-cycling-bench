@@ -209,7 +209,10 @@ local function setup_range_flow()
     pktgen.page("range")
     
     pktgen.range.dst_mac("0", "start", "{dst_mac}")
+    pktgen.range.dst_mac("0", "stop", "{src_mac}")
     pktgen.range.src_mac("0", "start", "{src_mac}")
+    pktgen.range.src_mac("0", "stop", "{src_mac}")
+
     pktgen.delay(1000);
 
     pktgen.range.dst_ip("0", "start", "{dst_ip}")
@@ -877,13 +880,19 @@ def get_mac_address(
 
     check_cmd = f"kubectl exec {pod_name} -- pgrep -f dpdk-testpmd"
     result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-
     if result.returncode == 0:
-        raise RuntimeError(f"❌ testpmd is already running in pod {pod_name}. Cannot retrieve MAC address.")
+        raise RuntimeError(
+            f"❌ testpmd is already running in pod {pod_name}. Cannot retrieve MAC address.")
 
-    shell_cmd = "dpdk-testpmd -a \\$PCIDEVICE_INTEL_COM_DPDK --"
+    shell_cmd = "dpdk-testpmd -a \\$PCIDEVICE_INTEL_COM_DPDK -- "
     full_cmd = f"kubectl exec {pod_name} -- sh -c \"{shell_cmd}\""
     result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"❌ Cannot retrieve MAC address, "
+                           f"from a pod {pod_name}, exit code {result.returncode}, "
+                           f"out: {result.stderr} , err: {result.stdout}")
+
     full_output = result.stdout + result.stderr
     match = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", full_output)
     return match.group(0) if match else None
@@ -946,7 +955,6 @@ def check_npz_validity(
 
     except Exception as e:
         return False, f"Error reading npz: {e}"
-
 
 
 def has_profile_run(
@@ -1758,6 +1766,23 @@ def timeout_handler(exit_code):
     pass
 
 
+def generate_cmdline_file(
+        pod: str,
+        disable_promisc: bool,
+        cmdline_dir="/tmp/testpmd"
+) -> str:
+    lines = []
+    if disable_promisc:
+        lines.append("set promisc all off")
+
+    lines.append("start")
+    filename = f"{cmdline_dir}/startup_rx_{pod}.txt"
+    with open(filename, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    return filename
+
+
 def start_dpdk_testpmd(
         rx_pods: List[str],
         rx_numa: List[str],
@@ -1816,9 +1841,8 @@ def start_dpdk_testpmd(
                     f"❌ {pod} has only {available_cores} cores; need at least {required} for proper pinning.")
             usable_cores = cmd.rx_num_core
 
-        # Now select the cores
         main_core = numa_cores[0]
-        rx_cores = numa_cores[1:1 + usable_cores]  # use next N cores
+        rx_cores = numa_cores[1:1 + usable_cores]
         rx_core_str = ",".join(rx_cores)
         all_core_str = ",".join([main_core] + rx_cores)
 
@@ -1833,27 +1857,50 @@ def start_dpdk_testpmd(
             warmup_duration=cmd.warmup_duration,
             socket_mem=cmd.rx_socket_mem
         )
-
         # we give kernel/DPDK time to release resources after warmup
-        time.sleep(1)
+        time.sleep(5)
+
+        subprocess.run(f"kubectl exec {pod} -- pkill -SIGINT dpdk-testpmd", shell=True)
         # duration = max(int(cmd.duration) - 2, 5)
 
         expected_samples = cmd.duration // cmd.sample_interval
         buffer_per_sample = 2
         total_buffer = expected_samples * buffer_per_sample
-        timeout_duration = cmd.duration + total_buffer + 60
+
+        timeout_duration = 10 if cmd.verify_testpmd else (cmd.duration + expected_samples * 2 + 60)
+        burst = f"--burst={cmd.burst}" if getattr(cmd, "latency", False) and hasattr(cmd, "burst") else ""
+
+        log_suffix = "--auto-start --stats-period 1 --display-xstats=rx_errors,rx_missed_errors,rx_unknown_protocol_packets,rx_dropped_packets > /output/stats.log 2>&1 &"
+        if cmd.verify_testpmd:
+            log_suffix = "--auto-start --stats-period 1"
 
         testpmd_cmd = (
-            f"timeout {timeout_duration} dpdk-testpmd --main-lcore {main_core} -l {all_core_str} -n 4 "
+            f"timeout {timeout_duration} dpdk-testpmd --force-max-simd-bitwidth=512 --main-lcore {main_core} -l {all_core_str} -n 4 "
             f"--socket-mem {cmd.rx_socket_mem} "
             f"--proc-type auto --file-prefix testpmd_rx_{pod} "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
-            f"-- --forward-mode=rxonly --auto-start --stats-period 1 > /output/stats.log 2>&1 &"
+            f"-- --forward-mode=rxonly "
+            f"--cmdline-file=/tmp/startup_rx.txt  "
+            f"--rss-udp "
+            f"--disable-rss "
+            f"--nb-cores {len(rx_cores)} "
+            f"--rxq={cmd.rxq} "
+            f"--txq={cmd.txq} "
+            f"--txd={cmd.txd} "
+            f"--rxd={cmd.rxd} "
+            f"{burst} "
+            f"{log_suffix}"
         )
 
-        kubectl_cmd = f"kubectl exec {pod} -- sh -c '{testpmd_cmd}'"
-        logger.info(f"🚀 [INFO] Starting testpmd on {pod} → main_core={main_core}, rx_cores={rx_cores}")
+        # in verify_testpmd cmd just need capture EAL log so we see it did not reject anything.
+        kubectl_cmd = (
+            f"kubectl exec {'-it' if cmd.verify_testpmd else ''} {pod} -- sh -c '{testpmd_cmd}'"
+        )
 
+        print("kubectl_cmd")
+        print(kubectl_cmd)
+
+        logger.info(f"🚀 [INFO] Starting testpmd on {pod} → main_core={main_core}, rx_cores={rx_cores}")
         subprocess.run(kubectl_cmd, shell=True)
         time.sleep(2)
 
@@ -2070,6 +2117,16 @@ def launch_pktgen(
     #         f"-m [{tx_cores_port1}:{rx_cores_port1}].1"
     #     )
 
+    # ```
+    # --pci-blocklist, -b : Add a PCI device in block list.
+    #                         Prevent EAL from using this PCI device. The argument
+    #                         format is <domain:bus:devid.func>.
+    #   --pci-allowlist, -w : Add a PCI device in allow list.
+    #                         Only use the specified PCI devices. The argument
+    #                         format is <[domain:]bus:devid.func>. This option
+    #                         can be present several times (once per device).
+    #                         NOTE: PCI allowlist cannot be used with -b option
+    # ```
     pktgen_cmd = (
         f"cd /usr/local/bin; timeout {timeout_duration} pktgen --no-telemetry -l "
         f"{all_cores} -n 4 --socket-mem {cmd.tx_socket_mem} --main-lcore {main_core} "
@@ -2293,8 +2350,21 @@ def start_pktgen_on_tx_pods(
                     f"-m [{','.join(tx1)}:{','.join(rx1)}].1"
                 )
 
-            else:
+            # One RX core, all others to TX
+            elif getattr(cmd, "rx1_txn", False):
+                # last core in rx
+                rx_core = usable_cores[-1]
+                # pop last core that we use for rx the rest is tx
+                tx_cores = usable_cores[:-1]
+                # Format TX cores as a range or single core
+                if len(tx_cores) > 1:
+                    tx_core_str = f"{tx_cores[0]}-{tx_cores[-1]}"
+                else:
+                    tx_core_str = f"{tx_cores[0]}"
 
+                port_to_core = f"-m [{tx_core_str}:{rx_core}].0"
+
+            else:
                 tx_core_range = f"{tx_cores[0]}-{tx_cores[-1]}" if len(tx_cores) > 1 else f"{tx_cores[0]}"
                 rx_core_range = f"{rx_cores[0]}-{rx_cores[-1]}" if len(rx_cores) > 1 else f"{rx_cores[0]}"
                 tx_cores = tx_core_range
@@ -2385,6 +2455,7 @@ def build_stats_filename(
         expid: str = ""
 ) -> str:
     """ Returns a  file name for TX/RX stats results.
+
     :param pod_name:  Name of pod.
     :param tx_cores:  Number of TX/RX cores.
     :param rx_cores:  Number of RX/TX cores.
@@ -2688,8 +2759,11 @@ def get_active_vfs(
         return []
 
 
-def get_unicast_pkt_counts(nic_name, vf_id):
-    """Returns RX and TX unicast packet counts for a VF as a tuple."""
+def get_unicast_pkt_counts(
+        nic_name: str,
+        vf_id: int
+) -> Tuple[int, int]:
+    """Returns RX and TX unicast packet counts for a VF as a tuple (rx, tx)."""
     try:
         output = subprocess.check_output(
             ["esxcli", "network", "sriovnic", "vf", "stats", "-n", nic_name, "-v", str(vf_id)],
@@ -2697,8 +2771,8 @@ def get_unicast_pkt_counts(nic_name, vf_id):
         )
         rx_match = re.search(r"Rx Unicast Pkt:\s+(\d+)", output)
         tx_match = re.search(r"Tx Unicast Pkt:\s+(\d+)", output)
-        rx = int(rx_match.group(1)) if rx_match else 0
-        tx = int(tx_match.group(1)) if tx_match else 0
+        rx: int = int(rx_match.group(1)) if rx_match else 0
+        tx: int = int(tx_match.group(1)) if tx_match else 0
         return rx, tx
     except subprocess.CalledProcessError:
         return 0, 0
@@ -2708,6 +2782,7 @@ def main_start_generator(
         cmd: argparse.Namespace
 ) -> List[threading.Thread]:
     """ Starts dpdk_testpmd on RX pods and pktgen on TX pods unless skipped via flags.
+
     :param cmd: args
     :return: Nothing
     """
@@ -2746,6 +2821,9 @@ def main_start_generator(
     rx_core_list = []
     if not cmd.skip_testpmd:
         rx_core_list = start_dpdk_testpmd(rx_pods, rx_numa, tx_macs, cmd)
+        if cmd.verify_testpmd:
+            logger.info("🔍 --verify-testpmd enabled. Exiting early after validation.")
+            sys.exit(0)
     else:
         logger.info("⏭️  Skipping testpmd launch on RX pods (--skip-testpmd)")
 
@@ -3328,12 +3406,30 @@ if __name__ == '__main__':
              "Uses convergence Lua template with binary rate search."
     )
 
-    start.add_argument("--txd", type=int, default=2048, help="🚀 TX (Transmit) descriptor count")
-    start.add_argument("--rxd", type=int, default=2048, help="📡 RX (Receive) descriptor count")
+    start.add_argument(
+        "--verify-testpmd", action="store_true",
+        help="✅ Only verify that testpmd starts correctly on RX pods and exit early"
+    )
+
+    start.add_argument("--txd", type=int, default=2048, help="🚀 TX (Transmit) descriptor count (default: 2048)")
+    start.add_argument("--rxd", type=int, default=2048, help="📡 RX (Receive) descriptor count (default: 2048)")
+
+    start.add_argument("--rxq", type=int, default=16, help="📥 RX queue count for testpmd (default: 16)")
+    start.add_argument("--txq", type=int, default=16, help="📤 TX queue count for testpmd (default: 16)")
+
+    start.add_argument(
+        "--burst", type=int, default=32,
+        help="📦 Burst size for latency mode (only used if --latency is set)"
+    )
 
     start.add_argument(
         "--warmup-duration", type=int, default=4,
         help="🧪 Warmup duration in seconds to trigger MAC learning (default: 2)"
+    )
+
+    start.add_argument(
+        "--rx1-txn", action="store_true",
+        help="🧠 Use 1 core for RX and all remaining for TX (non-latency mode only)"
     )
 
     start.add_argument(
