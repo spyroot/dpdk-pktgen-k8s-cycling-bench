@@ -1,12 +1,13 @@
 #!/bin/bash
 # This script resolve all worker node TCA create ,
-# Add additional disks , note it will power off VM,  add N disk in same datastore that first disk resides on.
+# Add additional disks , note it will power off VM,
+# add N disk in same datastore that first disk resides on.
 # if you need more advanced logic on multi datastore do it
 
 # Mus
 
 # Default values
-DEFAULT_CLUSTER="perf"
+DEFAULT_CLUSTER="tkg"
 DEFAULT_DISK_SIZE="256"
 DEFAULT_DISK_NUM="3"
 
@@ -102,8 +103,6 @@ if ! govc about &>/dev/null; then
 fi
 
 echo "✅ Successfully connected to vCenter."
-# Get all worker nodes (exclude control-plane nodes), if you need add disk to limited
-# ( you can add filter here)
 echo "🔍 Retrieving worker nodes..."
 WORKER_NODES=$(kubectl get nodes --no-headers | grep -v "control-plane" | awk '{print $1}')
 
@@ -118,8 +117,8 @@ echo "$WORKER_NODES"
 # We resolve datastore based on where first disk is
 # i.e if VM uses local disk you might have million DSs you need indicate which one for disk create.
 function get_vm_datastore() {
-    local VM_NAME=$1
 
+    local VM_NAME=$1
     # Get the first disk device (JSON format)
     DISK_DEVICE=$(govc device.ls -json -vm "$VM_NAME" | jq -r '.devices[] | select(.type == "VirtualDisk") | .name' | head -n 1)
 
@@ -133,10 +132,9 @@ function get_vm_datastore() {
     DATASTORE_NAME=$(echo "$DATASTORE_PATH" | awk -F'[][]' '{print $2}')
 
     # TODO need check for some akward space
-
-#    DATASTORE_NAME=$(echo "$DATASTORE_NAME" | tr -d '[:space:]')
-#    DATASTORE_NAME=$(echo "$DATASTORE_PATH" | sed -n 's/^\[\(.*\)\] .*$/\1/p')
-    # Return the properly formatted datastore name
+  #    DATASTORE_NAME=$(echo "$DATASTORE_NAME" | tr -d '[:space:]')
+  #    DATASTORE_NAME=$(echo "$DATASTORE_PATH" | sed -n 's/^\[\(.*\)\] .*$/\1/p')
+      # Return the properly formatted datastore name
      echo "$DATASTORE_NAME"
 }
 

@@ -8,9 +8,9 @@ This script is a comprehensive reporting tool for experiments conducted using
 🔧 Purpose
 ----------
 It processes experiment data collected from TX and RX pods—stored in `.npz`, `.csv`, and `.log` files—
-and generates  reports in Markdown, LaTeX, or Excel formats. These reports focus e:
+and generates reports in Markdown, LaTeX, or Excel formats. These reports focus e:
 
-- TX vs RX packet convergence
+- TX vs. RX packet convergence
 - Byte-level loss and packet loss statistics
 - Errors during packet reception
 - Multi-pod and multi-node topology layouts
@@ -60,6 +60,7 @@ import argparse
 import os
 import re
 import subprocess
+from collections import defaultdict
 from typing import Optional, Tuple, Dict, List
 
 import matplotlib.pyplot as plt
@@ -74,6 +75,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from openpyxl.cell.rich_text import CellRichText, TextBlock, InlineFont
 import numpy as np
+import seaborn as sns
 
 
 def load_npz_data(
@@ -129,8 +131,9 @@ def format_bytes(
 
 
 def format_number_compact(num):
-    """    Convert a large number into a compact human-readable string using
+    """ Convert a large number into a compact human-readable string using
     Kpkts, Mpkts, or Gpkts units.
+
     :param num:
     :return:
     """
@@ -179,8 +182,8 @@ def interpolate_to_match(
         target_len: int
 ) -> np.ndarray:
     """Interpolates a source array to match the length of a target.
-    :param source_array:
-    :param target_len:
+    :param source_array: Source array to interpolate.
+    :param target_len: Target length.
     :return:
     """
     source_x = np.linspace(0, 1, len(source_array))
@@ -198,7 +201,7 @@ def smooth_line(
     :param y: y (np.ndarray): 1D array of y-coordinates corresponding to `x`.
     :param points: points (int, optional): Number of points to generate in the smoothed output.
                 Defaults to 300.
-    :return: -Tuple[np.ndarray, np.ndarray]:  Tuple[np.ndarray, np.ndarray]: Smoothed x and y arrays of length `points`
+    :return: - Tuple[np.ndarray, np.ndarray]:  Tuple[np.ndarray, np.ndarray]: Smoothed x and y arrays of length `points`
     """
     if len(x) < 4 or len(y) < 4:
         return x, y
@@ -287,7 +290,7 @@ def plot_rx_tx_pps(
     :param metadata: Metadata dictionary with keys like
                                    'exp_id', 'pod_pair', 'txcores', 'rxcores',
                                    'pkt_size', 'percent_rate', etc.
-    :param save_dir: Directory where the plot image will be saved. ( by default saved in each pod pair )
+    :param save_dir: Directory where the plot image will be saved. (by default, saved in each pod pair)
     :return:
     """
     if len(tx_pps) == 0 or len(rx_pps) == 0:
@@ -340,11 +343,64 @@ def plot_rx_tx_pps(
     return save_path
 
 
-def sort_experiments(experiments):
-    """Sort experiments according to the metadata dictionary.
-    :param experiments:
+def group_flow_stats_by_pkt_size(
+        metadatas: List[Dict],
+        tx_pps_list: List[np.ndarray],
+        rx_pps_list: List[np.ndarray],
+) -> Dict[int, List[Tuple[int, float, float, float, float]]]:
+    """
+    Group per-flow TX and RX PPS stats by flow count and packet size.
+
+    :param metadatas: Metadata for each experiment
+    :param tx_pps_list: List of TX PPS time series
+    :param rx_pps_list: List of RX PPS time series
+    :return: Dict {flow_count: [(pkt_size, tx_mean, tx_max, rx_mean, rx_max)]}
+    """
+    flow_grouped = defaultdict(list)
+
+    for meta, tx_pps, rx_pps in zip(metadatas, tx_pps_list, rx_pps_list):
+        pkt_size = int(meta.get("pkt_size", 0))
+        flows = int(meta.get("num_flows", 0))
+        tx_mean = np.mean(tx_pps)
+        tx_max = np.max(tx_pps)
+        rx_mean = np.mean(rx_pps[rx_pps > 1000])  # filter idle
+        rx_max = np.max(rx_pps)
+
+        flow_grouped[flows].append((pkt_size, tx_mean, tx_max, rx_mean, rx_max))
+
+    return flow_grouped
+
+
+def plot_throughput_by_frame_size(flow_grouped_data, output_path="frame_size_vs_throughput.png"):
+    """
+    Plot RFC2544-style throughput vs frame size, grouped by flow count.
+
+    :param flow_grouped_data: Dict from flow counts to a list of (pkt_size, mpps)
+    :param output_path: File path to save the plot
     :return:
     """
+    plt.figure(figsize=(10, 6))
+    for flows, points in sorted(flow_grouped_data.items()):
+        pkt_sizes, mpps = zip(*sorted(points))
+        plt.plot(pkt_sizes, mpps, marker="o", label=f"{flows} Flows")
+
+    plt.title("TX Frame Rate vs Frame Size (RFC2544 Style)")
+    plt.xlabel("Frame Size (Bytes)")
+    plt.ylabel("TX Frame Rate (Mpps)")
+    plt.grid(True)
+    plt.legend(title="Flow Count")
+    plt.tight_layout()
+    plt.savefig(output_path)
+    print(f"📊 Frame size vs throughput plot saved to: {output_path}")
+    plt.close()
+
+
+def sort_experiments(experiments):
+    """Sort experiments according to the metadata dictionary.
+    :param experiments: Dictionary of experiment metadata.
+    :return:
+    """
+
     def sort_key(item):
         _, tx_file = item
         metadata = extract_metadata(os.path.basename(tx_file), full_path=tx_file)
@@ -373,12 +429,15 @@ def discover_experiments(root_dir="results"):
 
 def discover_experiment_ids(
         root_dir="results"):
-    """Walk the directory and collect experiment IDs based on .npz TX/RX file pairs."""
+    """Walk the directory and collect experiment IDs based on .npz TX/RX file pairs.
+    :param root_dir:
+    :return:
+    """
     exp_ids = set()
     for dirpath, _, filenames in os.walk(root_dir):
-        for fname in filenames:
-            if fname.endswith(".npz"):
-                match = re.match(r"^([a-f0-9]{8})_", fname)
+        for f_name in filenames:
+            if f_name.endswith(".npz"):
+                match = re.match(r"^([a-f0-9]{8})_", f_name)
                 if match:
                     exp_ids.add(match.group(1))
     return sorted(exp_ids)
@@ -395,6 +454,7 @@ def generate_latex_report(
         rx_packets: int,
         rx_errors: Optional[np.ndarray] = None,
         report_title: str = "Experiment Report",
+        input_dir: str = "results",
 ) -> str:
     """Generate latex report per each experiment.
 
@@ -408,6 +468,7 @@ def generate_latex_report(
     :param rx_packets: np.ndarray total received packets pps observer during a run ( sampled over time )
     :param rx_errors: np.ndarray rx errors observer during a run ( sampled over time )
     :param report_title: Title for report
+    :param input_dir:
     :return:
     """
     latex = []
@@ -490,7 +551,7 @@ def generate_latex_report(
     ))
 
     latex.append(r"\subsection*{TX vs RX PPS}")
-    relative_path = os.path.relpath(plot_filename, start="results")
+    relative_path = os.path.relpath(plot_filename, start=input_dir)
     latex.append(r"\includegraphics[width=\linewidth]{%s}" % relative_path)
 
     latex.append(r"\subsection*{Summary Statistics}")
@@ -642,7 +703,6 @@ def validate_required_keys(
 
 def console(tx_data, rx_data):
     """
-
     :param tx_data:
     :param rx_data:
     :return:
@@ -826,47 +886,65 @@ def format_number_compact(num):
 
 
 def generate_summary_excel(
-    tx_pps_mean: float,
-    rx_pps_mean: float,
-    total_tx_bytes: int,
-    total_rx_bytes: int,
-    byte_loss: int,
-    total_tx_packets: int,
-    total_rx_packets: int,
-    pkt_loss: int,
-    pkt_loss_pct: float,
-    metadatas: List[Dict[str, str]],
-    output_file: str = "results/structured_test_results.xlsx"
+        tx_pps_mean: float,
+        rx_pps_mean: float,
+        tx_pps_max: float,
+        rx_pps_max: float,
+        total_tx_bytes: int,
+        total_rx_bytes: int,
+        byte_loss: int,
+        total_tx_packets: int,
+        total_rx_packets: int,
+        pkt_loss: int,
+        pkt_loss_pct: float,
+        metadatas: List[Dict[str, str]],
+        output_file: Optional[str] = None,
+        output_dir: str = "results"
 ) -> None:
     """
     Generate an Excel summary report for a DPDK experiment.
 
-    :param metadatas:
-    :param pkt_loss_pct:
-    :param pkt_loss:
-    :param byte_loss:
-    :param tx_pps_mean:
-    :param rx_pps_mean:
-    :param total_tx_bytes:
-    :param total_rx_bytes:
-    :param total_tx_packets:
-    :param total_rx_packets:
-    :param output_file:
+    :param tx_pps_mean: Mean number of tx packets
+    :param rx_pps_mean: Mean number of rx packets
+    :param rx_pps_max:  Max number of rx packets
+    :param tx_pps_max:  Max number of tx packets
+    :param metadatas: List of metadata files
+    :param pkt_loss_pct: Packet loss percentage
+    :param pkt_loss: Packet loss percentage
+    :param byte_loss: Byte loss percentage
+    :param total_tx_bytes: Total number of tx packets
+    :param total_rx_bytes: Total number of rx packets
+    :param total_tx_packets: Total number of tx packets
+    :param total_rx_packets: Total number of rx packets
+    :param output_file: Output file name
+    :param output_dir: Output directory
     :return:
     """
+
+    if output_file is None:
+        output_file = os.path.join(output_dir, "structured_test_results.xlsx")
+    elif not os.path.isabs(output_file) and os.path.dirname(output_file) == "":
+        output_file = os.path.join(output_dir, output_file)
 
     tx_pps_mpps = round(tx_pps_mean / 1_000_000, 2)
     rx_pps_mpps = round(rx_pps_mean / 1_000_000, 2)
 
     observed_stats = [
-        ("Total TX PPS", f"{int(tx_pps_mean):,} ({tx_pps_mpps} Mpps)"),
-        ("Total RX PPS", f"{int(rx_pps_mean):,} ({rx_pps_mpps} Mpps)"),
+        ("Mean TX PPS", f"{int(tx_pps_mean):,} ({tx_pps_mpps} Mpps)"),
+        ("Mean RX PPS", f"{int(rx_pps_mean):,} ({rx_pps_mpps} Mpps)"),
+
+        ("Max TX PPS", f"{int(tx_pps_max):,} ({tx_pps_max / 1_000_000:.2f} Mpps)"),
+        ("Max RX PPS", f"{int(rx_pps_max):,} ({rx_pps_max / 1_000_000:.2f} Mpps)"),
+
         ("Total TX Bytes", f"{total_tx_bytes:,} ({format_bytes(total_tx_bytes)})"),
         ("Total RX Bytes", f"{total_rx_bytes:,} ({format_bytes(total_rx_bytes)})"),
+
         ("TX Packets", f"{total_tx_packets:,} ({format_number_compact(total_tx_packets)})"),
         ("RX Packets", f"{total_rx_packets:,} ({format_number_compact(total_rx_packets)})"),
+
         ("Packet Loss", f"{pkt_loss:,}"),
         ("Packet Loss %", f"{pkt_loss_pct:.2f}"),
+
         ("Byte Loss", f"{format_bytes(byte_loss)}"),
     ]
 
@@ -877,21 +955,25 @@ def generate_summary_excel(
     multi_core = False
 
     for i, m in enumerate(metadatas):
+
         pod_pair = m.get("pod_pair", f"tx{i}-rx{i}")
         tx_node = m.get("tx_node")
         rx_node = m.get("rx_node")
         tx_cores = m.get("tx_numa", "")
         rx_cores = m.get("rx_numa", "")
-
+        percent_rate = m.get("percent_rate")
         node_set.add(tx_node)
         node_set.add(rx_node)
         all_pairs.append(f"Pair: {pod_pair}  | TX Cores: {tx_cores} | RX Cores: {rx_cores}")
 
         try:
+
             tx_core_count = len(tx_cores.split())
             rx_core_count = len(rx_cores.split())
+
             if tx_core_count > 2 or rx_core_count > 2:
                 multi_core = True
+
         except:
             pass
 
@@ -900,13 +982,15 @@ def generate_summary_excel(
     core_summary = "Multi-Core" if multi_core else "Single-Core"
     pkt_size = metadatas[0].get("pkt_size", "N/A")
     flows = metadatas[0].get("num_flows", "N/A")
+    percent_rate = metadatas[0].get("percent_rate", "N/A")
 
-    title_line = f"{node_summary}, {pod_summary}, {core_summary}. {pkt_size} Byte , {flows} Flows"
+    title_line = f"{node_summary}, {pod_summary}, {core_summary}. {pkt_size} Byte , {flows} Flows, Rate {percent_rate}"
     metadata_description = title_line + "\n\n" + "\n".join(all_pairs)
 
     df = pd.DataFrame([{
         "Test Description": metadata_description,
         "Observed Statistics": observed_block,
+        "Rate (%)": metadatas[0].get("percent_rate", "N/A"),
         "VM / TCA TKG": "",
         "SLA Target": "",
         "Reference TCA/TGK": "",
@@ -921,6 +1005,8 @@ def generate_summary_excel(
         for r in dataframe_to_rows(df, index=False, header=False):
             ws.append(r)
         wb.save(output_file)
+
+    df.sort_values(by="Rate (%)", inplace=True)
 
     wb = load_workbook(output_file)
     ws = wb.active
@@ -969,10 +1055,70 @@ def generate_summary_excel(
     ws.column_dimensions['A'].width = 60
     ws.column_dimensions['B'].width = 50
     ws.column_dimensions['C'].width = 20
-    ws.column_dimensions['C'].width = 20
+    ws.column_dimensions['D'].width = 20
+    ws.column_dimensions['E'].width = 20
 
     wb.save(output_file)
     print(f"✅ Excel report saved: {output_file}")
+
+
+def build_results_dataframe(tx_files, input_dir):
+    rows = []
+
+    for tx_file in tx_files:
+        tx_filename = os.path.basename(tx_file)
+        tx_dir = os.path.dirname(tx_file)
+        tx_parts = tx_filename.split("_")
+
+        if len(tx_parts) < 3 or not tx_parts[1].startswith("tx"):
+            continue
+
+        tx_pod = tx_parts[1]
+        rx_pod = tx_pod.replace("tx", "rx", 1)
+        rx_filename = tx_filename.replace(f"{tx_pod}_tx_", f"{rx_pod}_rx_")
+        rx_file = os.path.join(tx_dir, rx_filename)
+
+        if not os.path.isfile(tx_file) or not os.path.isfile(rx_file):
+            continue
+
+        try:
+            tx_data = np.load(tx_file)
+            rx_data = np.load(rx_file)
+
+            tx_packets = int(np.max(tx_data["port_opackets"]))
+            rx_packets = int(np.max(rx_data["rx_packets"]))
+            tx_bytes = int(np.max(tx_data["port_obytes"]))
+            rx_bytes = int(np.max(rx_data["rx_bytes"]))
+
+            metadata = extract_metadata(tx_filename, full_path=tx_file)
+            percent_rate = int(metadata.get("percent_rate", 0))
+            pkt_size = int(metadata.get("pkt_size", 0))
+            flows = int(metadata.get("num_flows", 0))
+
+            row = {
+                "exp_id": metadata.get("exp_id", ""),
+                "pod_pair": metadata.get("pod_pair", ""),
+                "pkt_size": pkt_size,
+                "flows": flows,
+                "rate_percent": percent_rate,
+                "tx_packets": tx_packets,
+                "rx_packets": rx_packets,
+                "tx_bytes": tx_bytes,
+                "rx_bytes": rx_bytes,
+                "byte_loss": tx_bytes - rx_bytes,
+                "pkt_loss": tx_packets - rx_packets,
+                "pkt_loss_pct": 100 * (tx_packets - rx_packets) / tx_packets if tx_packets > 0 else 0,
+                "mean_tx_pps": float(np.mean(tx_data["pkts_tx"])),
+                "mean_rx_pps": float(np.mean(rx_data["rx_pps"][rx_data["rx_pps"] > 1000])),
+                "max_tx_pps": float(np.max(tx_data["pkts_tx"])),
+                "max_rx_pps": float(np.max(rx_data["rx_pps"])),
+            }
+
+            rows.append(row)
+        except Exception as e:
+            print(f"⚠️ Failed to parse {tx_file}: {e}")
+
+    return pd.DataFrame(rows)
 
 
 def create_report(
@@ -980,15 +1126,22 @@ def create_report(
         is_debug: bool = False,
         output_format: str = "markdown",
         report_title: str = "Experiment Report",
-):
+        input_dir: str = "results"
+) -> Tuple[Optional[str], pd.DataFrame]:
     """
-    :param exp_id:
+        Generate a formatted performance report (Markdown, LaTeX, or Excel) for a given DPDK experiment.
+        This function processes TX and RX `.npz` result files corresponding to the specified experiment ID,
+        extracts statistics such as TX/RX PPS, packet loss, and byte-level discrepancies, generates plots,
+        and returns or saves the report in the specified format.
+
+    :param exp_id:  The 8-character experiment ID used to locate the TX/RX `.npz` result files.
     :param is_debug:
-    :param output_format:
-    :param report_title:
-    :return:
+    :param output_format:  Report format to generate: one of ["markdown", "latex", "excel"]. Default is "markdown".
+    :param report_title: Title of the report. Default is "Experiment Report".
+    :param input_dir: Directory containing the `.npz` result files.
+    :return: Returns the rendered report string (for Markdown/LaTeX) or None (if Excel format was selected or generation failed).
     """
-    experiments = discover_experiments()
+    experiments = discover_experiments(input_dir)
     matching_tx_files = [tx for eid, tx in experiments if eid == exp_id]
 
     def tx_sort_key(tx_file):
@@ -1010,12 +1163,11 @@ def create_report(
 
     if not matching_tx_files:
         print(f"❌ No TX .npz files found for experiment ID: {exp_id}")
-        return
+        return None, pd.DataFrame()
 
     combined_reports = []
     pod_pairs = []
 
-    # this aggregated data for summary table
     total_tx_bytes = 0
     total_rx_bytes = 0
     total_tx_packets = 0
@@ -1106,7 +1258,7 @@ def create_report(
             report = generate_latex_report(
                 metadata, plot_path, tx_data["pkts_tx"], rx_data["rx_pps"],
                 tx_bytes, rx_bytes, tx_packets, rx_packets, rx_errors,
-                report_title=report_title
+                report_title=report_title,
             )
         else:
             report = generate_summary_markdown(
@@ -1118,7 +1270,7 @@ def create_report(
 
     if not combined_reports:
         print("⚠️ No valid reports generated.")
-        return
+        return None, pd.DataFrame()
 
     if (output_format in ["latex", "excel"]) and all_tx_pps and all_rx_pps:
         target_len = min(len(arr) for arr in all_tx_pps)
@@ -1190,6 +1342,8 @@ Total RX PPS & %.0f \\
         generate_summary_excel(
             np.mean(agg_tx_pps),
             np.mean(agg_rx_pps[agg_rx_pps > 1000]),
+            np.max(agg_tx_pps),
+            np.max(agg_rx_pps),
             total_tx_bytes,
             total_rx_bytes,
             byte_loss,
@@ -1197,14 +1351,97 @@ Total RX PPS & %.0f \\
             total_rx_packets,
             pkt_loss,
             pkt_loss_pct,
-            metadatas=metadatas
+            metadatas=metadatas,
+            output_file="structured_test_results.xlsx",
+            output_dir=input_dir,
         )
-        return
+
+    df_row = {
+        "exp_id": exp_id,
+        "pod_pair": "aggregate",
+        "pkt_size": metadatas[0].get("pkt_size"),
+        "percent_rate": metadatas[0].get("percent_rate"),
+        "num_flows": metadatas[0].get("num_flows"),
+        "tx_mpps": np.mean(agg_tx_pps) / 1e6,
+        "rx_mpps": np.mean(agg_rx_pps[agg_rx_pps > 1000]) / 1e6,
+        "max_tx_mpps": np.max(agg_tx_pps) / 1e6,
+        "max_rx_mpps": np.max(agg_rx_pps) / 1e6,
+        "tx_packets": total_tx_packets,
+        "rx_packets": total_rx_packets,
+        "tx_bytes": total_tx_bytes,
+        "rx_bytes": total_rx_bytes,
+    }
 
     if output_format == "latex":
-        return "\n\n\\newpage\n\n".join(combined_reports)
+        return "\n\n\\newpage\n\n".join(combined_reports), pd.DataFrame([df_row])
     else:
-        return "\n\n---\n\n".join(combined_reports)
+        return "\n\n---\n\n".join(combined_reports), pd.DataFrame([df_row])
+
+
+def plot_throughput_vs_frame_size(
+        df: pd.DataFrame,
+        input_dir: str,
+        link_speed_gbps: float = 25.0,
+        overhead: int = 0,
+):
+    """
+    Generate RFC2544-style plots of throughput vs frame size for each flow count.
+
+    This version includes a seaborn bar plot for measured throughput under the line plots.
+
+    :param df: Combined DataFrame of all experiment results
+    :param input_dir: Directory to save the generated plots
+    :param link_speed_gbps: Link speed in Gbps for theoretical line rate
+    :param overhead: Overhead in bytes for theoretical line rate
+    """
+    # Set plot style
+    sns.set(style="whitegrid")
+
+    # Prepare and clean the DataFrame
+    df = df[df["percent_rate"].astype(int) == 100].copy()
+    df["pkt_size"] = pd.to_numeric(df["pkt_size"])
+    df["num_flows"] = pd.to_numeric(df["num_flows"])
+    df["tx_mpps"] = pd.to_numeric(df["tx_mpps"])
+    df["max_tx_mpps"] = pd.to_numeric(df["max_tx_mpps"])
+
+    unique_flows = sorted(df["num_flows"].unique())
+
+    for flow in unique_flows:
+        subset = (
+            df[df["num_flows"] == flow]
+            .groupby("pkt_size", as_index=False)[["tx_mpps", "max_tx_mpps"]]
+            .max()
+            .sort_values("pkt_size")
+        )
+
+        pkt_sizes = subset["pkt_size"]
+        measured_tx_mpps = subset["max_tx_mpps"]
+        max_tx_mpps = subset["max_tx_mpps"]
+
+        x = np.arange(len(pkt_sizes))
+        total_overhead = 20 + 4
+        theoretical_mpps = link_speed_gbps * 1e9 / ((pkt_sizes + total_overhead) * 8) / 1e6
+        plt.figure(figsize=(14, 6))
+
+        sns.barplot(x=pkt_sizes, y=measured_tx_mpps, color="lightblue", label="Measured MPPS Rate", )
+        plt.plot(x, max_tx_mpps, marker="s", linestyle="--", color="blue", label="Max Mpps Rate (Device Limit)")
+        plt.plot(x, theoretical_mpps, marker="o", linewidth=2, color="darkorange", label="Theoretical Rate (L1)")
+
+        plt.title(f"Frame Rate vs. Frame Size — {flow} Flows for {int(link_speed_gbps)} link speed")
+        plt.xlabel("Frame Size (Bytes)")
+        plt.ylabel("Throughput (Mpps)")
+
+        plt.xticks(x, pkt_sizes)
+
+        plt.legend()
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)  # Keep grid on y-axis for readability
+        # plt.tight_layout()
+
+        # Save the plot to a file
+        output_path = os.path.join(input_dir, f"frame_size_vs_throughput_{flow}_flows.png")
+        plt.savefig(output_path)
+        print(f"✅ Saved plot: {output_path}")
+        plt.close()
 
 
 def main(cmd):
@@ -1213,7 +1450,7 @@ def main(cmd):
     :return:
     """
     output_ext = "md" if cmd.format == "markdown" else "tex"
-    report_path = os.path.join("results", f"report.{output_ext}")
+    report_path = os.path.join(cmd.input_dir, f"report.{output_ext}")
 
     if cmd.exp_id:
         report = create_report(
@@ -1221,6 +1458,7 @@ def main(cmd):
             is_debug=cmd.format == "latex" and cmd.pdf,
             output_format=cmd.format,
             report_title=cmd.title,
+            input_dir=cmd.input_dir,
         )
         if report:
             with open(report_path, "w") as f:
@@ -1236,7 +1474,7 @@ def main(cmd):
 
         print("🔎 No experiment ID provided — scanning all...")
 
-        discovered = discover_experiments()
+        discovered = discover_experiments(cmd.input_dir)
         grouped = {}
         for exp_id, tx_file in discovered:
             grouped.setdefault(exp_id, []).append(tx_file)
@@ -1262,16 +1500,34 @@ def main(cmd):
         sorted_eids = sorted(grouped.keys(), key=sort_key)
 
         all_reports = []
+        all_dfs = []
+
         for i, exp_id in enumerate(sorted_eids, 1):
             print(f"\n=== [{i}/{len(sorted_eids)}] Processing experiment ID: {exp_id} ===")
-            report = create_report(
+            report, df_frame = create_report(
                 exp_id=exp_id,
                 is_debug=cmd.format == "latex" and cmd.pdf,
                 output_format=cmd.format,
                 report_title=cmd.title,
+                input_dir=cmd.input_dir,
             )
+
             if report:
                 all_reports.append(report)
+
+            if df_frame is not None and not df_frame.empty:
+                all_dfs.append(df_frame)
+
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            print("\n📊 Combined Summary Table:")
+            print(combined_df)
+
+            output_summary_path = os.path.join(cmd.input_dir, "summary_all_experiments.csv")
+            combined_df.to_csv(output_summary_path, index=False)
+            print("✅ Saved combined summary to summary_all_experiments.csv")
+
+            plot_throughput_vs_frame_size(combined_df, input_dir=cmd.input_dir)
 
         if all_reports:
             if cmd.format == "latex":
@@ -1315,5 +1571,9 @@ if __name__ == "__main__":
                         help="Output report format")
     parser.add_argument("--pdf", action="store_true", help="📄 Compile LaTeX report to PDF")
     parser.add_argument("--title", default="Experiment Report", help="Title for the report section")
+    parser.add_argument("--input-dir", default="results", help="Directory containing experiment result files")
+    parser.add_argument("--overhead", default="4", help="Additional overhead on wire. (used for theoretical line rate calculation)")
+    parser.add_argument("--speed", default="25.0", help="link speed")
+
     args = parser.parse_args()
     main(args)

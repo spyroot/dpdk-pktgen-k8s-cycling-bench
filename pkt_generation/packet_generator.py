@@ -5,18 +5,20 @@ across a variety of configurations and scenarios.
 Basic Scenario:
 ------------------
 
-The most basic one two pod on same worker node.  On act as TX and another as RX and we want to test many
-variation in terms packet size , number flow.
+The most basic one two pods on the same worker node.
+On act as TX and another as RX and we want to test much
+variation in terms of packet size, number flow.
 
-More sophisticated if same worker node host N pod let say it 8 pod,  and we form 1:1 8 pair.
+More sophisticated if the same worker node host N pod let say it 8 pods, and we form 1:1 8 pair.
 tx0 - rx0
 tx1 - rx1
 so on...
 
-And alternative configuration where we have two node and each node host N pod , it could since pair
+And alternative configuration where we have two nodes and each node host N pod, it could since pair
 TX0 - RX0 where TX0 on Node Alice and RX on Node BOB
 or N pods
-where TX0,TX1 . son on
+where TX0,TX1.
+son on
 
 
 The simplest test setup involves two pods scheduled on the same Kubernetes worker node:
@@ -168,6 +170,9 @@ class SSHConnectionManager:
             return client
 
     def close_all(self):
+        """Close all active session
+        :return:
+        """
         with self.lock:
             for client in self.connections.values():
                 client.close()
@@ -209,7 +214,7 @@ local function setup_range_flow()
     pktgen.page("range")
     
     pktgen.range.dst_mac("0", "start", "{dst_mac}")
-    pktgen.range.dst_mac("0", "stop", "{src_mac}")
+    pktgen.range.dst_mac("0", "stop", "{dst_mac}")
     pktgen.range.src_mac("0", "start", "{src_mac}")
     pktgen.range.src_mac("0", "stop", "{src_mac}")
 
@@ -220,7 +225,7 @@ local function setup_range_flow()
     pktgen.range.dst_ip("0", "min", "{dst_ip}")
     pktgen.range.dst_ip("0", "max", "{dst_max_ip}")
     pktgen.delay(1000);
-
+    
     pktgen.range.src_ip("0", "start", "{src_ip}")
     pktgen.range.src_ip("0", "inc", "{src_ip_inc}")
     pktgen.range.src_ip("0", "min", "{src_ip}")
@@ -244,9 +249,14 @@ local function setup_range_flow()
     pktgen.range.pkt_size("0", "inc", 0)
     pktgen.range.pkt_size("0", "min", {pkt_size})
     pktgen.range.pkt_size("0", "max", {pkt_size})
-    
+
     pktgen.set_range("0", "on");
     pktgen.set("0", "count", 0);
+    pktgen.set("0", "size", {pkt_size})
+    
+    pktgen.clear("all");
+    pktgen.cls();
+    
     pktgen.page("stats");
     pktgen.delay(1000);
 
@@ -539,13 +549,12 @@ def discover_experiments(root_dir="results"):
     """Return a list of (exp_id, tx_file_path) tuples for sorting and processing."""
     experiments = []
     for dirpath, _, filenames in os.walk(root_dir):
-        for fname in filenames:
-            if fname.endswith(".npz") and "_tx_" in fname or "_rx_":
-                match = re.match(r"^([a-f0-9]{8})_", fname)
+        for f_name in filenames:
+            if f_name.endswith(".npz") and "_tx_" in f_name or "_rx_":
+                match = re.match(r"^([a-f0-9]{8})_", f_name)
                 if match:
                     exp_id_ = match.group(1)
-                    full_path = os.path.join(dirpath, fname)
-                    experiments.append((exp_id_, full_path))
+                    experiments.append((exp_id_, os.path.join(dirpath, f_name)))
     return experiments
 
 
@@ -573,9 +582,9 @@ def sanity_check(
 
     # each profile under experiment must have same number of pair
     max_len = max(len(v) for v in exp_dirs_by_id.values())
-    for exp_id, exp_dir in exp_dirs_by_id.items():
+    for eid, exp_dir in exp_dirs_by_id.items():
         if len(exp_dir) < max_len:
-            sanity_results[exp_id] = False
+            sanity_results[eid] = False
             continue
 
         exp_results = {}
@@ -613,7 +622,7 @@ def sanity_check(
             except FileNotFoundError:
                 exp_results[r_dir] = False
 
-        sanity_results[exp_id] = all(exp_results.values())
+        sanity_results[eid] = all(exp_results.values())
 
     return sanity_results
 
@@ -856,7 +865,7 @@ def get_mac_address(
     """Extract MAC address from dpdk-testpmd inside a pod with env var.
 
     Note we always mask EAL via -a hence TX or RX pod see a single DPDK port.
-    All profile use VF's mac address that eliminates -P (promiscuous mode)
+    All profiles use VF's mac address that eliminates -P (promiscuous mode)
 
     :param is_retry:
     :param pod_name: tx0, tx1, rx0 etc. pod name
@@ -891,7 +900,7 @@ def get_mac_address(
     if result.returncode != 0:
         raise RuntimeError(f"❌ Cannot retrieve MAC address, "
                            f"from a pod {pod_name}, exit code {result.returncode}, "
-                           f"out: {result.stderr} , err: {result.stdout}")
+                           f"out: {result.stderr} , err: {result.stdout} cmd failed {full_cmd}" )
 
     full_output = result.stdout + result.stderr
     match = re.search(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", full_output)
@@ -1153,9 +1162,8 @@ def collect_cmdline_from_nodes(
             cmdline_output = result.stdout.strip()
             cmdlines[node] = cmdline_output
 
-            file_path = os.path.join(output_dir, f"{node}_cmdline.txt")
-            with open(file_path, "w") as f:
-                f.write(cmdline_output + "\n")
+            with open(os.path.join(output_dir, f"{node}_cmdline.txt"), "w") as f_:
+                f_.write(cmdline_output + "\n")
 
             logger.info(f"📝 Collected /proc/cmdline from node {node} (via pod {pod})")
 
@@ -1368,7 +1376,7 @@ def parse_pktgen_port_rate_csv(
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
     """
     Parses the port_rate_stats.csv collected from Pktgen TX_N pod using plain string ops.
-    Returns both metrics and a metadata map indicating column positions.
+    Return both metrics and a metadata map indicating column positions.
 
     :param file_path: path to the CSV file
     :return: Tuple of (metrics dictionary, metadata dictionary)
@@ -1517,7 +1525,7 @@ def copy_flows_to_pods(tx_pods: List[str], rx_pods: List[str]) -> None:
 
 def load_metadata_file(path: str) -> Dict[str, str]:
     """
-    Loads metadata.txt from given path and returns a dictionary of key-value pairs.
+    Loads metadata.txt from a given path and returns a dictionary of key-value pairs.
     Lines starting with '#' are ignored.
     """
     metadata = {}
@@ -1728,7 +1736,7 @@ def warmup_mac_learning(
 
     :param pod: RX pode.
     :param tx_mac:  RX mac address.  This mac address is a destination mac from RX view point.
-    :param cores_str:  RX cores number.
+    :param cores_str:  RX core number.
     :param warmup_duration:  Duration of warmup in seconds.
     :param socket_mem:
     :return:
@@ -1793,12 +1801,12 @@ def start_dpdk_testpmd(
         Starts DPDK testpmd in rxonly mode on each RX pod using NUMA-aware CPU pinning.
 
     For each RX pod:
-        - Selects a master core and RX worker cores
-        - Sends a warm-up flow to facilitate  MAC address learning
-        - Launches testpmd in background with specified core list
+        - Selects a primary core and RX worker cores
+        - Sends a warm-up flow to facilitate MAC address learning
+        - Launches testpmd in the background with specified core list
         - Verifies that testpmd is running and logging
 
-    By default, we use all core or clamp from value from args.
+    By default, we use all cores or clamp from value from args.
 
     :param rx_pods: List of RX pod names (e.g., ["rx0", "rx1"])
     :param rx_numa:  Corresponding list of core strings from `numactl -s` (e.g., ["0 1 2 3", "4 5 6 7"])
@@ -1806,7 +1814,7 @@ def start_dpdk_testpmd(
     :param cmd:
     :return:   List[Tuple[str, str, str]]:
             A list of tuples, one per RX pod:
-              - main_core (str): The master core ID
+              - main_core (str): The primary core ID
               - rx_core_str (str): Comma-separated RX cores used
               - all_core_str (str): Comma-separated full core list (main + RX)
 
@@ -1857,11 +1865,10 @@ def start_dpdk_testpmd(
             warmup_duration=cmd.warmup_duration,
             socket_mem=cmd.rx_socket_mem
         )
+
         # we give kernel/DPDK time to release resources after warmup
         time.sleep(5)
-
         subprocess.run(f"kubectl exec {pod} -- pkill -SIGINT dpdk-testpmd", shell=True)
-        # duration = max(int(cmd.duration) - 2, 5)
 
         expected_samples = cmd.duration // cmd.sample_interval
         buffer_per_sample = 2
@@ -1870,14 +1877,18 @@ def start_dpdk_testpmd(
         timeout_duration = 10 if cmd.verify_testpmd else (cmd.duration + expected_samples * 2 + 60)
         burst = f"--burst={cmd.burst}" if getattr(cmd, "latency", False) and hasattr(cmd, "burst") else ""
 
-        log_suffix = "--auto-start --stats-period 1 --display-xstats=rx_errors,rx_missed_errors,rx_unknown_protocol_packets,rx_dropped_packets > /output/stats.log 2>&1 &"
+        log_suffix = ("--auto-start --stats-period 1 --display-xstats=rx_errors,rx_"
+                      "missed_errors,rx_unknown_protocol_packets,rx_"
+                      "dropped_packets > /output/stats.log 2>&1 &")
         if cmd.verify_testpmd:
             log_suffix = "--auto-start --stats-period 1"
 
+        simd_flag = "--force-max-simd-bitwidth=512" if getattr(cmd, "simd512", True) else ""
+
         testpmd_cmd = (
-            f"timeout {timeout_duration} dpdk-testpmd --force-max-simd-bitwidth=512 --main-lcore {main_core} -l {all_core_str} -n 4 "
+            f"timeout {timeout_duration} dpdk-testpmd {simd_flag} --main-lcore {main_core} -l {all_core_str} -n 4 "
             f"--socket-mem {cmd.rx_socket_mem} "
-            f"--proc-type auto --file-prefix testpmd_rx_{pod} "
+            f"--proc-type primary --file-prefix testpmd_rx_{pod} "
             f"-a $PCIDEVICE_INTEL_COM_DPDK "
             f"-- --forward-mode=rxonly "
             f"--cmdline-file=/tmp/startup_rx.txt  "
@@ -1888,11 +1899,13 @@ def start_dpdk_testpmd(
             f"--txq={cmd.txq} "
             f"--txd={cmd.txd} "
             f"--rxd={cmd.rxd} "
+            f"--max-pkt-len=9600 "
+            f"--tx-offloads=0x00008000 "
             f"{burst} "
             f"{log_suffix}"
         )
 
-        # in verify_testpmd cmd just need capture EAL log so we see it did not reject anything.
+        # in verify_testpmd cmd just need to capture EAL log, so we see it did not reject anything.
         kubectl_cmd = (
             f"kubectl exec {'-it' if cmd.verify_testpmd else ''} {pod} -- sh -c '{testpmd_cmd}'"
         )
@@ -1933,7 +1946,7 @@ def generate_sampling_lua_script(
         rate_file: str = '/tmp/port_rate_stats.csv',
         port_file: str = '/tmp/port_stats.csv',
 ):
-    """This function generate lua script that we use to sample stats.
+    """This function generates lua script that we use to sample stats.
 
     :param filepath:  a path where save (locally before we copy to each pod)
     :param pkt_file:  this is a pkt stats location insider a pod
@@ -2132,7 +2145,7 @@ def launch_pktgen(
         f"{all_cores} -n 4 --socket-mem {cmd.tx_socket_mem} --main-lcore {main_core} "
         f"--proc-type auto --file-prefix pg_{pod} "
         f"-a $PCIDEVICE_INTEL_COM_DPDK "
-        f"-- -G --txd={cmd.txd} --rxd={cmd.rxd} "
+        f"-- -j -G --txd={cmd.txd} --rxd={cmd.rxd} "
         f"-f {lua_script_path} {port_to_core}"
     )
     #
@@ -2337,7 +2350,7 @@ def start_pktgen_on_tx_pods(
                 tx_cores = sorted([numa_cores[i + 1] for i in range(txrx_cores)])
                 rx_cores = sorted([numa_cores[txrx_cores + 1 + i] for i in range(txrx_cores)])
 
-                # for latency we split all TX / 2 since we need to port
+                # for latency, we split all TX / 2 since we need to port
                 # and RX / 2
                 half = len(tx_cores) // 2
                 tx0 = tx_cores[:half]
@@ -3181,18 +3194,21 @@ def discover_available_profiles(
     return sorted(profiles)
 
 
-def upload_npz_to_wandb(result_dir="results", expid=None):
+def upload_npz_to_wandb(
+        test_result_dir: Optional[str] = "results",
+        expid=None
+):
     """
     Uploads and logs contents of .npz files from result_dir to wandb for visualization.
     """
     import glob
 
-    npz_files = glob.glob(os.path.join(result_dir, "*.npz"))
+    npz_files = glob.glob(os.path.join(test_result_dir, "*.npz"))
     if expid:
-        npz_files = [f for f in npz_files if expid in os.path.basename(f)]
+        npz_files = [f_ for f_ in npz_files if expid in os.path.basename(f)]
 
     if not npz_files:
-        logger.info(f"⚠️ No .npz files found for expid={expid} in {result_dir}")
+        logger.info(f"⚠️ No .npz files found for expid={expid} in {test_result_dir}")
         return
 
     run_name = f"pktgen_run_{expid}" if expid else f"pktgen_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -3417,6 +3433,12 @@ if __name__ == '__main__':
     start.add_argument("--rxq", type=int, default=16, help="📥 RX queue count for testpmd (default: 16)")
     start.add_argument("--txq", type=int, default=16, help="📤 TX queue count for testpmd (default: 16)")
 
+    start.add_argument('--simd512', action='store_true', default=True,
+                       help='Use --force-max-simd-bitwidth=512 (default: True)')
+
+    start.add_argument('--no-simd512', dest='simd512', action='store_false',
+                       help='Disable --force-max-simd-bitwidth=512')
+
     start.add_argument(
         "--burst", type=int, default=32,
         help="📦 Burst size for latency mode (only used if --latency is set)"
@@ -3553,7 +3575,8 @@ if __name__ == '__main__':
         "--min-samples", type=int, default=5, help="Minimum valid sample count (default: 5)"
     )
 
-    sanity.add_argument("--purge", action="store_true", help="Purge invalid experiment result directories")
+    sanity.add_argument(
+        "--purge", action="store_true", help="Purge invalid experiment result directories")
 
     sanity.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]

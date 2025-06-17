@@ -19,7 +19,7 @@ Key Features:
 - Profile Generation: Automatically generates packet flow profiles for different packet sizes, flow counts, and rates.
 - Kubernetes Integration: Manages pods for packet generation (TX) and reception (RX) within a Kubernetes cluster.
 - DPDK & Pktgen Support: Utilizes DPDK for high-performance packet processing and Pktgen for traffic generation.
-- Stats Collection: Gathers detailed performance statistics like packet rate, byte count, and errors.
+- Stat Collection: Gathers detailed performance statistics like packet rate, byte count, and errors.
 - Results Logging: Logs the collected statistics into .npz files for post-test analysis, and optionally uploads the 
 - results to Weights & Biases (W&B) for visualization.
 
@@ -28,8 +28,9 @@ Key Features:
 Before setting up and running the packet generation and reception tests, ensure the following prerequisites are met:
 
 ## Kubernetes Cluster
-A working Kubernetes cluster is set up with admin access.  The cluster should have DPDK and SR-IOV (or Multus) c
-onfigured to support the required network devices.
+A working Kubernetes cluster is set up with admin access.
+The cluster should have DPDK and SR-IOV (or Multus) 
+configured to support the required network devices.
 
 ## DPDK Device Plugin:
 
@@ -60,7 +61,7 @@ DPDK workloads will run.
  To check if Hugepages and VFIO are enabled:
 
  * The system should have hugepages enabled, with at least 2Gi of 1Gi Hugepages available.
- * You can verify this by checking the available Hugepages with the following command:
+ * You can verify this by checking the available Huge pages with the following command:
 
 ```bash
 cat /proc/meminfo | grep HugePages
@@ -157,7 +158,7 @@ for both TX and RX pods.
 The start_generator command uses the --tx-socket-mem and --rx-socket-mem flags to pass the memory configuration to the running pods.
 When the test starts, the TX and RX pods will use the configured memory settings, ensuring they have enough resources to handle high-performance packet processing.
 
-Hence depend on topology you need make sure you have sufficient hugepages
+Hence, depending on topology, you need to make sure you have sufficient hugepages
 
 (Note in packet generator that we describe later it  --tx-socket-mem 4096 --rx-socket-mem 4096 flags)
 ```bash
@@ -165,7 +166,7 @@ python packet_generator.py start_generator --profile flow_1flows_64B_100rate.lua
 ```
 
 In this example: 
- - Note it value per pod.   If you use 3 pod for TX 3 * 4096MB and for RX 3 * 4096MB
+ - Note its value per pod.   If you use pod 3 for TX 3 * 4096MB and for RX 3 * 4096MB
  - if you run all pods on same node TX 3 * 4096MB + for RX 3 * 4096MB 
  - TX Pod (Transmission): Allocates 4096MB of socket memory for TX operations.
  - RX Pod (Reception): Allocates 4096MB of socket memory for RX operations.
@@ -203,7 +204,7 @@ different nodes within the cluster.
 
 Before running the script, ensure the following:
 
--- Kubernetes Cluster: A Kubernetes cluster is set up and you have access to it with the necessary privileges to create pods.
+-- Kubernetes Cluster: A Kubernetes cluster is set up, and you have access to it with the necessary privileges to create pods.
 -- Kubeconfig: Ensure you have access to the Kubernetes cluster and the kubeconfig file is available at ~/.kube/config.
 -- DPDK Device Plugin: Make sure the Kubernetes cluster has the DPDK device plugin installed for managing DPDK resources, and that the DPDK network resources are available on the nodes where you plan to deploy the pods.
 -- SR-IOV or DPDK Resources: You should have DPDK VF resources or SR-IOV VF resources configured on your nodes (depending on your resource type). This is important to provide the necessary network interface for DPDK.
@@ -340,7 +341,7 @@ This is the main entrypoint to run DPDK-based tests.
 - Ensures correct pod-node placement (same or different node).
 - Checks for already completed tests and skips them.
 - Backs up existing results.
-- Runs the test for each matched TX/RX pod pair using a selected Lua profile.
+- Run the test for each matched TX/RX pod pair using a selected Lua profile.
 
 #### ✨ Key Features
 
@@ -361,7 +362,7 @@ This is the main entrypoint to run DPDK-based tests.
 
 ## Example Commands
 
-### Example 1: Create 1 Pair of Pods on the Same Node with 4 CPU and 8Gi Memory. ( Check topologies below)
+### Example 1: Create 1 Pair of Pods on the Same Node with 4 CPU and 8Gi Memory. (Check topologies below)
 
 ```bash
 ./create-pod-pairs.sh -n 1 -c 4 -m 8 -d 2 -v 2 -g 2 -s
@@ -383,7 +384,7 @@ This command will create 1 pair of tx and rx pods, each with 4 CPU cores, 8Gi me
 
 ```
 This command generates the YAML files for 2 pairs of tx and rx pods but does not apply them to the Kubernetes cluster.
-This is useful for inspection before applying them.
+This is useful for inspections before applying them.
 
 Example 3: Create Pods with a Custom Container Image
 
@@ -417,7 +418,7 @@ The following variables will be dynamically replaced in the pod template:
 Pods Not Deploying:
   - Check that your nodes have sufficient DPDK/SR-IOV resources and that the correct device plugin is installed.
   - Use kubectl describe pod <pod_name> to inspect individual pod status.
-  - Check device plugin.
+  - Check the device plugin.
 
 Dry-Run Issues:
   - If you're running in dry-run mode and the YAML files are not being generated as expected, 
@@ -632,7 +633,7 @@ Example Directory Structure:
 You can note that in each lua file we source mac and destination mac, during this phase we only populate 
 require profiles.
 
-if we run , we can see that all profile post generation automatically discovered and we can consume any.
+if we run, we can see that all profiles post generation are automatically discovered, and we can consume any.
 for packet generation.
 
 ## 🧩 Detailed Argument Descriptions
@@ -745,7 +746,7 @@ Total RX socket memory = RX_POD_COUNT × RX_SOCKET_MEM_MB
 ```bash
 python packet_generator.py start_generator --tx-socket-mem 4096 --rx-socket-mem 4096
 ```
-If you have 3 TX and 3 RX pods on the same node, total memory required would be:
+If you have 3 TX and 3 RX pods on the same node, the total memory required would be:
 
 ```text
 TX: 3 × 4096MB = 12GiB
@@ -829,7 +830,8 @@ EAL Flags, master core
 
 ### Appendix.
 
-Default pod template , note persistent storage optional.   As part of k8s there separate provisioner I use.
+Default pod template, note persistent storage optional.
+As part of k8s, there separate provisioner I use.
 Check sub-dir provisioner for details.
 
 ```yaml
