@@ -24,10 +24,10 @@
 # 2. The worker nodes have the required tools (`lsblk`, `pvcreate`, `vgcreate`, `lvcreate`) installed.
 # 3. The user has appropriate sudo permissions on the worker nodes.
 
-TARGET_SIZE="50G"      # Size of each volume to be created
-USERNAME="capv"      # Username for SSH
-DISK="/dev/sdc"            # Disk to partition (e.g., /dev/sdc)
-SUDO_PASSWORD="VMware1!"  # Sudo password (if required)
+TARGET_SIZE="50G"           # Size of each volume to be created
+USERNAME="capv"             # Username for SSH
+DISK="/dev/sdc"             # Disk to partition (e.g., /dev/sdc)
+SUDO_PASSWORD="VMware1!"    # Sudo password (if required)
 LOG_FILE="/tmp/storage-setup.log"
 
 if ! command -v sshpass &>/dev/null; then
