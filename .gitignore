@@ -1,5 +1,7 @@
 # Ignore PNG images
 *.png
+*.log
+*.csv
 
 # Ignore text files
 *.txt
