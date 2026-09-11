@@ -1,0 +1,120 @@
+---
+# CI for the internal GitLab mirror (hott/dpdk-pktgen-k8s-cycling-bench on
+# gitlab.dcloud.run). GitHub stays the source of truth; this side exists to
+# rebuild the image and publish it to the lab's own registry so the cluster
+# does not depend on Docker Hub reachability or rate limits.
+#
+# IMAGE_NAME and DOCKER_TAG come from the Makefile so there is one definition
+# of what gets built. Registry and project come from CI variables so the same
+# pipeline works against a different registry without edits.
+#
+# Required CI/CD variables (Settings -> CI/CD -> Variables):
+#   REGISTRY_HOST      e.g. harbor.dcloud.run
+#   REGISTRY_PROJECT   e.g. galileo
+#   REGISTRY_USER      masked
+#   REGISTRY_PASSWORD  masked, protected
+
+stages:
+  - lint
+  - build
+  - publish
+
+variables:
+  # Keep in step with the Makefile rather than restating the image name.
+  IMAGE_NAME: spyroot/dpdk-pktgen-k8s-cycling-bench
+  DOCKER_TAG: latest
+  TARGET_IMAGE: "$REGISTRY_HOST/$REGISTRY_PROJECT/$IMAGE_NAME:$DOCKER_TAG"
+
+default:
+  tags:
+    - galileo
+  interruptible: true
+
+# ---------------------------------------------------------------- lint
+
+shellcheck:
+  stage: lint
+  image: koalaman/shellcheck-alpine:stable
+  script:
+    # Severity error only. The scripts carry warnings today; failing on those
+    # would gate every change on unrelated cleanup. Tighten to warning once
+    # the existing set is clean, not before.
+    - shellcheck --severity=error ./*.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+bash-syntax:
+  stage: lint
+  image: bash:5
+  script:
+    - for f in ./*.sh; do echo "checking $f"; bash -n "$f"; done
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+python-lint:
+  stage: lint
+  image: python:3.12-alpine
+  before_script:
+    - pip install --quiet ruff
+  script:
+    - ruff check --select E9,F63,F7,F82 ./*.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ---------------------------------------------------------------- build
+
+# The image is ~8 GB and 123 layers. Building it on every push would dominate
+# the runner, so it is manual on branches and automatic only on the default
+# branch and tags.
+build-image:
+  stage: build
+  image: quay.io/buildah/stable
+  variables:
+    STORAGE_DRIVER: vfs
+    BUILDAH_FORMAT: docker
+  script:
+    - >-
+      buildah bud --storage-driver=$STORAGE_DRIVER
+      -t "$IMAGE_NAME:$DOCKER_TAG" .
+    - buildah images --storage-driver=$STORAGE_DRIVER
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+      allow_failure: true
+
+# ---------------------------------------------------------------- publish
+
+publish-image:
+  stage: publish
+  image: quay.io/buildah/stable
+  variables:
+    STORAGE_DRIVER: vfs
+  script:
+    - |
+      required="REGISTRY_HOST REGISTRY_PROJECT REGISTRY_USER REGISTRY_PASSWORD"
+      for v in $required; do
+        eval "val=\$$v"
+        if [ -z "$val" ]; then
+          echo "missing CI variable: $v" >&2
+          exit 1
+        fi
+      done
+    - >-
+      buildah login --username "$REGISTRY_USER"
+      --password "$REGISTRY_PASSWORD" "$REGISTRY_HOST"
+    - buildah bud --storage-driver=$STORAGE_DRIVER -t "$TARGET_IMAGE" .
+    - buildah push --storage-driver=$STORAGE_DRIVER "$TARGET_IMAGE"
+    # Read the tag back rather than trusting the push exit code.
+    - >-
+      buildah inspect --storage-driver=$STORAGE_DRIVER
+      --type image "$TARGET_IMAGE" >/dev/null
+    - echo "published $TARGET_IMAGE"
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: false
