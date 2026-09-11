@@ -36,10 +36,18 @@
 #    - Default: /output
 # 2. Optionally, enable Dev Mode for faster, reduced tests.
 #    - Set DEV_MODE=true for shorter durations and lower workloads (default is false).
+# 3. Optionally, set TARGET_DIR to choose WHERE fio writes its test files.
+#    - Default: the current working directory, which is the previous behaviour.
+#    - The fio jobs below pass no --filename and no --directory, so fio writes
+#      into the working directory. When the device under test is mounted
+#      somewhere else, the run silently measures the container filesystem
+#      instead and still reports plausible-looking numbers. Set TARGET_DIR to
+#      the mount point to make the target explicit.
 #
 # Example usage:
 # $ export OUTPUT_DIR=/path/to/output/directory  # (optional)
 # $ export DEV_MODE=true  # (optional, enables faster tests)
+# $ export TARGET_DIR=/mnt/pvc  # (optional, where fio writes its test files)
 # $ ./fio_test.sh  # Run the tests and store results in the specified output directory
 #
 # ===========================
@@ -51,6 +59,17 @@
 
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 DEV_MODE="${DEV_MODE:-false}"
+
+# fio is given no --filename/--directory, so it writes to the working
+# directory. Default to the current one to preserve existing behaviour, and
+# allow TARGET_DIR to point the run at a mounted device explicitly.
+TARGET_DIR="${TARGET_DIR:-$(pwd)}"
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "TARGET_DIR does not exist: $TARGET_DIR" >&2
+    exit 1
+fi
+cd "$TARGET_DIR" || exit 1
+echo "fio target directory: $TARGET_DIR"
 
 extract_metrics() {
     local RESULT_FILE=$1
